@@ -730,7 +730,12 @@ function appendFileLine(filePath, line) {
     return;
   }
   ensureParentDirectory(filePath);
-  fs.appendFileSync(path.resolve(filePath), `${line}\n`);
+  fs.appendFile(path.resolve(filePath), `${line}\n`, (err) => {
+    if (err) {
+      // We use console.error here because the async logger itself failed
+      console.error(`[SYSTEM ERROR] Failed to write to ${filePath}: ${err.message}`);
+    }
+  });
 }
 
 function log(message, level = 'info', options = {}) {
