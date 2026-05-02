@@ -1,85 +1,90 @@
 # Solana Meme Sniper Bot
 
-This project is a high-performance Node.js Solana trading bot consolidated into a single engine (`sniper-bot.js`) that handles both live and paper trading.
+A high-performance, modular trading engine designed for high-frequency sniping of new SPL token launches on the Solana blockchain. This bot combines real-time websocket discovery with a multi-stage "Stress Test" audit pipeline and institutional-grade risk management.
 
-## Core Features
+## Project Vision
 
-- **Unified Architecture**: Switch between Live and Paper trading with a single `.env` flag.
-- **Hybrid Discovery**: Watches SPL token `InitializeMint` events via Solana websockets for speed, with Jupiter REST polling backfill for reliability.
-- **Momentum Quality Engine**: Performs a "Stress Test" during the 30s survival delay:
-    - **Stall Filter**: Rejects tokens with decelerating growth.
-    - **Tape Filter**: Detects buy velocity decay.
-    - **Flatline Filter**: Rejects "pump and flatline" exhaustion patterns.
-    - **Consistency Check**: Ensures steady upward movement (60%+ green snapshots).
-- **Advanced Exit Strategy**:
-    - **Adaptive Profit Guard**: Dynamic trailing floor that arms after holding a midpoint for 10s.
-    - **Partial Milestone TP**: Sells 65% at 1.5x (default).
-    - **Moon Bag Trailing**: Monitors the remaining 35% balance every 30s.
-    - **Hard Stop-Loss**: 40% protection.
-    - **Liquidity Collapse**: Emergency exit if liquidity drops below 25% of entry.
-- **Daily Mood Detector**: Automatically reduces trade size or pauses trading based on recent win/loss rates.
+The bot is designed to solve the "first-minute volatility" problem in meme coin trading. By using a hybrid approach of speed (Websockets) and stability (REST polling), it identifies launches and then subjects them to a 30-second "Survival Delay" to verify momentum quality before committing capital.
 
-## Setup
+## Tech Stack
 
-### Prerequisites
-- Node.js 18+ (Node 24 recommended).
-- A Solana RPC URL (Websocket support required for fastest discovery).
-- A Jupiter API Key.
+- **Runtime**: Node.js 18+ (Optimized for Node 24).
+- **Blockchain**: `@solana/web3.js` (v1) for on-chain interactions and log streaming.
+- **DEX Aggregator**: Jupiter API (v6 Swap, v2 Tokens, v3 Price) for execution and pricing.
+- **Security**: GoPlus Solana Security API and BubbleMaps for cluster analysis.
+- **Persistence**: Event-driven JSON state management with machine-readable metrics.
 
-### Installation
+## Quickstart Guide
+
+### 1. Installation
 ```bash
 npm install @solana/web3.js@1 bs58
 ```
 
-### Configuration
-1. Copy `.env.example` to `.env`.
-2. Configure your `RPC_URL` and `JUPITER_API_KEY`.
-3. Set `PAPER_TRADING=true` for local simulation or `false` for live trading.
-4. If live trading, add your `PRIVATE_KEY` or `PRIVATE_KEY_PATH`.
+### 2. Configuration
+Create a `.env` file based on `.env.example`:
+- `RPC_URL`: Your Solana RPC (Websocket support required).
+- `JUPITER_API_KEY`: Required for swap execution.
+- `PRIVATE_KEY`: Your wallet's private key (for live trading).
+- `PAPER_TRADING`: Set to `true` to simulate trades without real SOL.
 
-## Running the Bot
-
-### Paper Trading (Default recommended for testing)
+### 3. Execution
 ```bash
-# Ensure PAPER_TRADING=true in .env
-node sniper-bot.js
+# Start the bot
+node bot.js
+
+# Run unit tests
+node tests.js
 ```
 
-### Live Trading
-```bash
-# Ensure PAPER_TRADING=false and DRY_RUN=false in .env
-node sniper-bot.js
-```
+## The Momentum Quality Engine
 
-### Dry Run (Analysis Only)
-```bash
-# Ensure DRY_RUN=true in .env
-node sniper-bot.js
-```
+Instead of buying purely on price spikes, the bot analyzes the "texture" of the pump during a required 30-second observation window:
 
-## Strategy Logic
+- **Stall Filter**: Compares acceleration across three time-segments. If growth in the final segment drops significantly below the initial burst, the trade is rejected.
+- **Velocity Decay**: Monitors the "Tape" (Buy/Sell counts). Rejects tokens where buy pressure in the second half of the delay drops below a specific ratio of the first half.
+- **Exhaustion Detection**: Identifies "Flatline" patterns where a vertical spike is followed by a tight, stagnant price range, indicating a potential top.
+- **Consistency Check**: Calculates the ratio of positive price snapshots to negative ones to ensure a steady trend rather than a single manipulated tick.
+- **Breakout Requirement**: Ensures the token has achieved a minimum 3% gain (1.03x) from discovery before entry.
 
-### 1. Discovery & Audit
-The bot monitors new launches and performs strict baseline checks:
-- Minimum liquidity, holder count, and buy volume.
-- Organic activity score and social link presence.
-- On-chain safety (Mint/Freeze authority disabled).
-- Concentration checks (Top holder percentage).
+## Institutional Risk Management
 
-### 2. Survival Delay (30s)
-The bot waits and collects snapshots to verify "Momentum Quality":
-- **Acceleration Stability**: Growth in the final 10s must be at least 40% of the initial 10s growth.
-- **Buy Velocity**: Buy pressure must remain consistent (last 15s vs first 15s).
-- **Consistency**: At least 60% of snapshots must be positive price moves.
+The bot employs multi-layer protection to secure capital and realize profits:
 
-### 3. Position Management
-Once entered, the position is managed by a multi-layer exit engine:
-- **Noise-Filtered Adaptive Guard**: Once price hits the midpoint between entry and target, a 10s timer starts. If held, a trailing exit is armed at that midpoint.
-- **Take-Profit**: 65% of the position is sold at 1.5x.
-- **Moon Bag**: The remaining 35% is checked every 30s. If it drops 10% from the TP price, it exits.
-- **Stop-Loss**: Immediate exit at 40% drawdown.
-- **Time-Exit**: Exits stagnant positions after 60 minutes if below 1.25x.
+### 1. Global Profit Guard (Max TP)
+A dynamic trailing stop-loss that is active throughout the entire trade lifecycle:
+$$ExitPrice = PeakPriceSinceEntry \times 0.80$$
+This formula ensures that as a token pumps, the exit floor "trails" the price upward, securing 80% of the maximum paper gains while allowing for unlimited upside.
 
-## Risk Warning
+### 2. Early Performance Guard
+A high-frequency safety check executed in the first 20 seconds of a trade:
+- If $Price < EntryPrice \times 0.90$ OR **Buy Pressure Collapses**, the bot immediately liquidates 60% of the position to mitigate "failed breakout" risk.
 
-Solana meme launches are extremely volatile and prone to manipulation. This bot includes advanced filters, but cannot guarantee protection against all rugs or market crashes. **Always test with `PAPER_TRADING=true` or `DRY_RUN=true` before committing capital.**
+### 3. Dynamic Priority Fees
+To ensure reliability during network congestion, the bot benchmarks the network in real-time:
+- Uses `getRecentPrioritizationFees` to target a specific percentile of recent success.
+- Applies a **Panic Multiplier** during emergency exits (Liquidity Collapse or Stop-Loss) to outbid other participants.
+
+### 4. Milestone Take-Profit
+- Automatically sells 60% of the position at a 1.5x milestone to secure the initial investment, leaving the remaining 40% to be managed by the Global Profit Guard.
+
+## Modular Architecture
+
+The project is refactored into a service-oriented structure for maintainability:
+
+- **`bot.js`**: The Orchestrator. Manages lifecycle, state persistence, and the main execution loop.
+- **`services.js`**: The Engine. Contains the heavy domain logic for Evaluation, Execution, and Risk.
+- **`config.js`**: The Brain. Centralized environment handling and trading constants.
+- **`utils.js`**: The Toolbox. Stateless helpers and a high-performance **Asynchronous Logging** system.
+- **`tests.js`**: The Validator. Unit testing suite for verifying the math engines in isolation.
+
+## Performance Features
+
+- **Non-Blocking I/O**: Custom asynchronous logging system ensures disk writes never block the trading event loop.
+- **Metrics Intelligence**: Generates a `metrics.json` file every session with a statistical breakdown of rejection reasons.
+- **Hybrid Discovery**: Combines Solana's `onLogs` subscription with Jupiter's recent token feed for zero-miss detection.
+
+---
+
+### Risk Warning
+Solana meme launches are extremely volatile. While this bot uses advanced filters and risk-reduction math, it cannot guarantee protection against all rugs or sudden market crashes. **Always test with Paper Trading or Dry Run mode before committing capital.**
