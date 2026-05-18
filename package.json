@@ -1,0 +1,33 @@
+{
+  "name": "veloci-buy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "High-performance Solana discovery and execution engine with Jupiter execution and staged audit filters.",
+  "main": "bot.js",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "start": "node bot.js",
+    "test": "node --test tests.js",
+    "check": "node --check bot.js && node --check config.js && node --check discovery.js && node --check engine.js && node --check monitor.js && node --check services.js && node --check trading.js && node --check utils.js && node --check tests.js",
+    "lint": "eslint .",
+    "format:check": "prettier --check .",
+    "audit": "npm audit",
+    "ci": "npm run audit && npm run check && npm run lint && npm run format:check && npm test"
+  },
+  "dependencies": {
+    "@jup-ag/api": "^6.0.48",
+    "@solana/addresses": "^6.8.0",
+    "@solana/rpc": "^6.8.0",
+    "@solana/rpc-subscriptions": "^2.0.0",
+    "@solana/signers": "^2.0.0",
+    "@solana/transactions": "^6.8.0",
+    "bs58": "^6.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.3.0",
+    "prettier": "^3.8.3"
+  }
+}
