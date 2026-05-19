@@ -749,6 +749,23 @@ function journalPaperTrade(ctx, entry) {
 }
 
 /**
+ * Appends a closed trade record to the cumulative trade journal file.
+ * Works for both paper and live trading modes.
+ * @param {Object} ctx - The application context.
+ * @param {Object} trade - The closed trade data record.
+ */
+function journalClosedTrade(ctx, trade) {
+  if (!ctx.config.tradeJournalFile) {
+    return;
+  }
+  const line = safeJsonStringify({
+    timestamp: new Date().toISOString(),
+    ...trade,
+  });
+  appendFileLine(ctx.config.tradeJournalFile, line);
+}
+
+/**
  * Computes the standard deviation of a series of numbers.
  * @param {number[]} values - The numeric values.
  * @returns {number} The standard deviation.
@@ -794,6 +811,7 @@ module.exports = {
   atomicWriteFile,
   sendNotification,
   journalPaperTrade,
+  journalClosedTrade,
   decodePumpCurve,
   decodeRaydiumPool,
   computeStandardDeviation,

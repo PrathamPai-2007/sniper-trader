@@ -21,6 +21,7 @@ Veloci-Buy is built on a decoupled, service-oriented architecture that prioritiz
 - **Security Audit Suite (`audit.js`)**: Performs deep on-chain inspection of mint/freeze authorities and holder concentration, integrated with external security signals.
 - **Parallel Execution Adapter (`trading.js`)**: A zero-wait Jupiter integration that pre-builds transactions during the audit phase to shave hundreds of milliseconds off execution.
 - **Risk Management (`monitor.js`)**: Automated position monitoring with dynamic TP/SL execution and trailing drawdown protection.
+- **Trade Replay Analyzer (`analyze.js`)**: Post-session analysis engine that ingests paper trade journals, reconstructs price paths, and runs exhaustive parameter grid scans to optimize strategy configuration.
 
 ---
 
@@ -41,6 +42,17 @@ A sophisticated 4-tier queuing system ensures that critical execution tasks (sig
 ### Dynamic Trade Management
 
 The bot now utilizes **Score-Based Profiles** to manage open positions. High-confidence candidates are granted wider trailing stops to capture parabolic moves, while lower-confidence entries utilize tight risk controls to lock in profits early.
+
+### Trade Replay & Parameter Optimization
+
+The `analyze.js` module provides a **Post-Session Replay Engine** that enables data-driven strategy tuning:
+
+- **Journal Ingestion**: Reads `trade-journal.jsonl` and `paper-trade-journal.jsonl` from isolated session directories to reconstruct every trade's lifecycle.
+- **Price Path Reconstruction**: Infers realistic price trajectories (entry → highest → exit) from recorded trade metadata.
+- **7-Parameter Grid Scan**: Exhaustively evaluates 9,216 combinations across stop loss, trailing drawdown, take profit multiples/fraction, early performance triggers, and max hold time.
+- **Rejection Funnel Analysis**: Aggregates audit rejection reasons across sessions to identify the most common filters blocking entries.
+
+Run `node analyze.js` after a paper trading session to receive ranked parameter recommendations and per-parameter sensitivity analysis.
 
 ---
 
@@ -109,6 +121,12 @@ The system is backed by a comprehensive validation suite covering critical path 
 ---
 
 ## Changelog
+
+### v2.x - Trade Replay Analyzer & Logging Enhancements
+
+- **Trade Replay Analyzer**: New `analyze.js` module for post-session parameter optimization via 7-variable grid scanning across 9,216 combos.
+- **Enriched Trade Journaling**: `recordClosedTrade` now persists 18 fields including entry score, TP profile, volatility scaler, and launchpad for accurate replay analysis.
+- **JSONL Journal Format**: Renamed `paper-trade-journal.json` to `.jsonl` for proper line-delimited parsing; added `journalClosedTrade` utility in `utils.js`.
 
 ### v2.x - Quant Strategy Upgrades
 

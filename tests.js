@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 
@@ -99,6 +100,8 @@ function createTestConfig(overrides = {}) {
     mintSignalMaxAttempts: 3,
     mintSignalRetryDelayMs: 750,
     rpcIndexingRetryDelayMs: 15_000,
+    maxRecheckAttempts: 5,
+    borderlineRecheckMaxAttempts: 3,
     priorityFeeBaseMicroLamports: 25_000,
     priorityFeeMaxMicroLamports: 5_000_000,
     priorityFeePanicMultiplier: 2,
@@ -1170,21 +1173,21 @@ test('monitor derives score-based trade management profiles', () => {
   assert.equal(high.profileId, 'high-confidence');
   assert.deepEqual(high.takeProfitMultiples, [1.5, 2.5]);
   assert.deepEqual(high.takeProfitFractions, [0.35, 0.35]);
-  assert.equal(high.trailingStopDrawdownPct, 0.25);
+  assert.equal(high.trailingStopDrawdownPct, 0.2);
   assert.equal(high.maxHoldMinutesResolved, 12);
 
   const standard = monitor.getTakeProfitPlan(ctx, 66);
   assert.equal(standard.profileId, 'standard-confidence');
   assert.deepEqual(standard.takeProfitMultiples, [1.3, 2.1]);
   assert.deepEqual(standard.takeProfitFractions, [0.5, 0.3]);
-  assert.equal(standard.trailingStopDrawdownPct, 0.2);
+  assert.equal(standard.trailingStopDrawdownPct, 0.16);
   assert.equal(standard.maxHoldMinutesResolved, 60);
 
   const low = monitor.getTakeProfitPlan(ctx, 61);
   assert.equal(low.profileId, 'fast-de-risk');
   assert.deepEqual(low.takeProfitMultiples, [1.2, 1.8]);
   assert.deepEqual(low.takeProfitFractions, [0.6, 0.25]);
-  assert.equal(low.trailingStopDrawdownPct, 0.15);
+  assert.equal(low.trailingStopDrawdownPct, 0.12);
   assert.equal(low.maxHoldMinutesResolved, 4);
 });
 
@@ -1465,6 +1468,103 @@ test('config startup validation requires explicit live trading arming', () => {
     ),
     true
   );
+});
+
+test('monitor recordClosedTrade enriches data and journals to trade-history file', () => {
+  const ctx = createTestConfig({ tradeJournalFile: 'mock-trade-history.jsonl' });
+  const state = createState({ closedTrades: [] });
+  const testCtx = {
+    config: ctx,
+    state,
+    logger: () => {},
+    persistState: () => {},
+  };
+
+  const pos = {
+    mint: 'JournalMint',
+    symbol: 'JRN',
+    openedAt: new Date(Date.now() - 120_000).toISOString(),
+    entryPriceUsd: 0.5,
+    entryUsdValue: 5,
+    realizedPnlUsd: 2.5,
+    realizedProceedsUsd: 7.5,
+    highestPriceUsd: 1.0,
+    entryScore: 80,
+    tpProfile: 'high-confidence',
+    takeProfitMultiples: [1.5, 2.5],
+    takeProfitFractions: [0.35, 0.35],
+    trailingStopDrawdownPctResolved: 0.2,
+    maxHoldMinutesResolved: 10,
+    volatilityScaler: 0.1,
+    entryLiquidityUsd: 5000,
+    launchpad: 'pump.fun',
+    targetsHit: 1,
+    initialBuyAmountSol: '0.05',
+  };
+
+  monitor.recordClosedTrade(testCtx, pos, 'stop-loss');
+
+  assert.equal(state.closedTrades.length, 1);
+  const trade = state.closedTrades[0];
+  assert.equal(trade.mint, 'JournalMint');
+  assert.equal(trade.entryScore, 80);
+  assert.equal(trade.tpProfile, 'high-confidence');
+  assert.deepEqual(trade.takeProfitMultiples, [1.5, 2.5]);
+  assert.equal(trade.trailingStopDrawdownPctResolved, 0.2);
+  assert.equal(trade.maxHoldMinutesResolved, 10);
+  assert.equal(trade.volatilityScaler, 0.1);
+  assert.equal(trade.entryLiquidityUsd, 5000);
+  assert.equal(trade.launchpad, 'pump.fun');
+  assert.equal(trade.targetsHit, 1);
+  assert.equal(trade.initialBuyAmountSol, '0.05');
+  assert.equal(trade.highestPriceUsd, 1.0);
+  assert.equal(trade.exitReason, 'stop-loss');
+  assert.ok(trade.holdSeconds >= 119 && trade.holdSeconds <= 121);
+});
+
+test('utils journalClosedTrade appends a JSONL line with enriched trade data', async () => {
+  const testFile = path.join(process.cwd(), '.test-artifacts', 'test-trade-journal.jsonl');
+  if (fs.existsSync(testFile)) fs.unlinkSync(testFile);
+  const ctx = createTestConfig({ tradeJournalFile: testFile });
+  const state = createState({ closedTrades: [] });
+  const testCtx = { config: ctx, state, logger: () => {}, persistState: () => {} };
+
+  const trade = {
+    mint: 'TestMint',
+    symbol: 'TST',
+    exitReason: 'take-profit-1.5x',
+    realizedPnlUsd: 3.5,
+    realizedProceedsUsd: 8.5,
+    entryUsdValue: 5,
+    entryPriceUsd: 0.5,
+    highestPriceUsd: 1.0,
+    holdSeconds: 120,
+    closedAt: '2026-01-01T00:00:00.000Z',
+    entryScore: 80,
+    tpProfile: 'high-confidence',
+    takeProfitMultiples: [1.5, 2.5],
+    takeProfitFractions: [0.35, 0.35],
+    trailingStopDrawdownPctResolved: 0.2,
+    maxHoldMinutesResolved: 10,
+    volatilityScaler: 0.1,
+    entryLiquidityUsd: 5000,
+    launchpad: 'pump.fun',
+    targetsHit: 1,
+    initialBuyAmountSol: '0.05',
+  };
+
+  utils.journalClosedTrade(testCtx, trade);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const content = fs.readFileSync(testFile, 'utf8').trim();
+  assert.ok(content.length > 0);
+  const lines = content.split('\n');
+  const parsed = JSON.parse(lines[lines.length - 1]);
+  assert.equal(parsed.mint, 'TestMint');
+  assert.equal(parsed.entryScore, 80);
+  assert.equal(parsed.exitReason, 'take-profit-1.5x');
+  assert.equal(parsed.tpProfile, 'high-confidence');
+  assert.ok(parsed.timestamp);
 });
 
 test('utility runBoundedPool preserves input order while enforcing concurrency limits', async () => {

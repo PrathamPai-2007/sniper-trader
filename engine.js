@@ -435,8 +435,8 @@ async function evaluateCandidate(
     if (typeof ctx.calculateGMI === 'function') {
       const gmi = ctx.calculateGMI();
       if (gmi < 0.3) {
-        adjustedMinScore += 15;
-        notes.push(`GMI low (${(gmi * 100).toFixed(1)}%): MinScore +15 (${adjustedMinScore})`);
+        adjustedMinScore += 10;
+        notes.push(`GMI low (${(gmi * 100).toFixed(1)}%): MinScore +10 (${adjustedMinScore})`);
       } else if (gmi > 0.7) {
         adjustedMinScore -= 5;
         notes.push(`GMI high (${(gmi * 100).toFixed(1)}%): MinScore -5 (${adjustedMinScore})`);

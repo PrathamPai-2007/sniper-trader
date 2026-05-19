@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node bot.js",
     "test": "node --test tests.js",
-    "check": "node --check bot.js && node --check config.js && node --check discovery.js && node --check engine.js && node --check monitor.js && node --check services.js && node --check trading.js && node --check utils.js && node --check tests.js",
+    "check": "node --check bot.js && node --check config.js && node --check discovery.js && node --check engine.js && node --check monitor.js && node --check services.js && node --check trading.js && node --check utils.js && node --check tests.js && node --check audit.js && node --check analyze.js",
     "lint": "eslint .",
     "format:check": "prettier --check .",
     "audit": "npm audit",

@@ -12,6 +12,7 @@ const {
   clamp,
   sendNotification,
   journalPaperTrade,
+  journalClosedTrade,
   runBoundedPool,
 } = require('./utils');
 const { constants } = require('./config');
@@ -26,19 +27,19 @@ const TP_PROFILE_DEFAULTS = {
     id: 'high-confidence',
     takeProfitMultiples: [1.5, 2.5],
     takeProfitFractions: [0.35, 0.35],
-    trailingStopDrawdownPct: 0.25,
+    trailingStopDrawdownPct: 0.2,
   },
   standard: {
     id: 'standard-confidence',
     takeProfitMultiples: [1.3, 2.1],
     takeProfitFractions: [0.5, 0.3],
-    trailingStopDrawdownPct: 0.2,
+    trailingStopDrawdownPct: 0.16,
   },
   low: {
     id: 'fast-de-risk',
     takeProfitMultiples: [1.2, 1.8],
     takeProfitFractions: [0.6, 0.25],
-    trailingStopDrawdownPct: 0.15,
+    trailingStopDrawdownPct: 0.12,
   },
 };
 
@@ -324,16 +325,31 @@ function recordClosedTrade(ctx, pos, reason) {
   if (!ctx?.state) return;
   if (!Array.isArray(ctx.state.closedTrades)) ctx.state.closedTrades = [];
   const openedAtMs = new Date(pos.openedAt || Date.now()).getTime();
-  ctx.state.closedTrades.push({
+  const trade = {
     mint: pos.mint,
     symbol: pos.symbol,
     exitReason: reason,
     realizedPnlUsd: Number(pos.realizedPnlUsd || 0),
     realizedProceedsUsd: Number(pos.realizedProceedsUsd || 0),
     entryUsdValue: Number(pos.entryUsdValue || 0),
+    entryPriceUsd: Number(pos.entryPriceUsd || 0),
+    highestPriceUsd: Number(pos.highestPriceUsd || pos.entryPriceUsd || 0),
     holdSeconds: Math.max(0, (Date.now() - openedAtMs) / 1000),
     closedAt: new Date().toISOString(),
-  });
+    entryScore: Number(pos.entryScore || 0),
+    tpProfile: pos.tpProfile || null,
+    takeProfitMultiples: pos.takeProfitMultiples || null,
+    takeProfitFractions: pos.takeProfitFractions || null,
+    trailingStopDrawdownPctResolved: Number(pos.trailingStopDrawdownPctResolved || 0),
+    maxHoldMinutesResolved: Number(pos.maxHoldMinutesResolved || 0),
+    volatilityScaler: Number(pos.volatilityScaler || 0),
+    entryLiquidityUsd: Number(pos.entryLiquidityUsd || 0),
+    launchpad: pos.launchpad || null,
+    targetsHit: Number(pos.targetsHit || 0),
+    initialBuyAmountSol: pos.initialBuyAmountSol || null,
+  };
+  ctx.state.closedTrades.push(trade);
+  journalClosedTrade(ctx, trade);
 }
 
 function getTrailingActivationMultiple(pos) {

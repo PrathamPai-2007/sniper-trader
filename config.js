@@ -155,7 +155,7 @@ const MOMENTUM_FILTERS = {
   buyVelocityDecayFactor: 0.4,
   maxExhaustionRangePct: 1.6,
   minMomentumConsistency: 0.6,
-  minMidpointGuardDelayMs: 10000,
+  minMidpointGuardDelayMs: 2000,
 };
 
 /**
@@ -207,10 +207,10 @@ function booleanFromEnv(name, fallback) {
 
 const STRATEGY_PRESETS = {
   conservative: {
-    minLiquidityUsd: 800,
-    minHolderCount: 16,
-    maxRecheckAttempts: 5,
-    minCandidateScore: 72,
+    minLiquidityUsd: 500,
+    minHolderCount: 12,
+    maxRecheckAttempts: 6,
+    minCandidateScore: 64,
     stopLossPct: 0.14,
     takeProfitMultiples: [1.3, 2.1],
     survivalDelaySeconds: 20,
@@ -236,10 +236,10 @@ const STRATEGY_PRESETS = {
     rpcIndexingRetryDelayMs: 5_000,
   },
   standard: {
-    minLiquidityUsd: 800,
-    minHolderCount: 16,
-    maxRecheckAttempts: 5,
-    minCandidateScore: 72,
+    minLiquidityUsd: 500,
+    minHolderCount: 12,
+    maxRecheckAttempts: 6,
+    minCandidateScore: 64,
     stopLossPct: 0.18,
     takeProfitMultiples: [1.3, 2.1],
     survivalDelaySeconds: 20,
@@ -384,7 +384,7 @@ function loadConfig() {
     stateFile: stateFile ? path.join(sessionDir, path.basename(stateFile)) : '',
     logFile: path.join(sessionDir, path.basename(logFile)),
     scannedTokensFile: path.join(sessionDir, path.basename(scannedTokensFile)),
-    paperTradeJournalFile: path.join(sessionDir, 'paper-trade-journal.json'),
+    paperTradeJournalFile: path.join(sessionDir, 'paper-trade-journal.jsonl'),
     tradeJournalFile: path.join(sessionDir, 'trade-journal.jsonl'),
     performanceStatsFile: path.join(sessionDir, 'performance-stats.json'),
     metricsFile: path.join(sessionDir, 'metrics.json'),
@@ -410,6 +410,7 @@ function loadConfig() {
     minBubbleMapsScore: numberFromEnv('MIN_BUBBLEMAPS_SCORE', 60),
     maxBubbleMapsLargestClusterShare: numberFromEnv('MAX_BUBBLEMAPS_LARGEST_CLUSTER_SHARE', 0.2),
     minCandidateScore: numberFromEnv('MIN_CANDIDATE_SCORE', preset.minCandidateScore),
+    maxRecheckAttempts: numberFromEnv('MAX_RECHECK_ATTEMPTS', preset.maxRecheckAttempts),
     minMomentumConsistency: numberFromEnv(
       'MIN_MOMENTUM_CONSISTENCY',
       preset.minMomentumConsistency
@@ -419,7 +420,7 @@ function loadConfig() {
     borderlineRecheckEnabled: booleanFromEnv('BORDERLINE_RECHECK_ENABLED', true),
     borderlineRecheckMinDelayMs: numberFromEnv('BORDERLINE_RECHECK_MIN_DELAY_MS', 10_000),
     borderlineRecheckMaxDelayMs: numberFromEnv('BORDERLINE_RECHECK_MAX_DELAY_MS', 20_000),
-    borderlineRecheckMaxAttempts: numberFromEnv('BORDERLINE_RECHECK_MAX_ATTEMPTS', 3),
+    borderlineRecheckMaxAttempts: numberFromEnv('BORDERLINE_RECHECK_MAX_ATTEMPTS', 6),
     borderlineThresholdBufferRatio: numberFromEnv('BORDERLINE_THRESHOLD_BUFFER_PCT', 20) / 100,
     survivalDelaySeconds: numberFromEnv('SURVIVAL_DELAY_SECONDS', preset.survivalDelaySeconds),
     survivalDelayThresholdHigh: numberFromEnv('SURVIVAL_DELAY_THRESHOLD_HIGH', 75),
@@ -432,9 +433,9 @@ function loadConfig() {
     maxBuyTopGrowthPct: numberFromEnv('MAX_BUY_TOP_GROWTH_PCT', 120),
     buyTopAthBufferPct: numberFromEnv('BUY_TOP_ATH_BUFFER_PCT', 2),
     buyingTheTopSlPct: numberFromEnv('BUYING_THE_TOP_SL_PCT', 25),
-    performanceCheckSeconds: numberFromEnv('PERFORMANCE_CHECK_SECONDS', 75),
+    performanceCheckSeconds: numberFromEnv('PERFORMANCE_CHECK_SECONDS', 90),
     performanceMinMomentum: numberFromEnv('PERFORMANCE_MIN_MOMENTUM', 1.05),
-    minHoldTimeSeconds: numberFromEnv('MIN_HOLD_TIME_SECONDS', 60),
+    minHoldTimeSeconds: numberFromEnv('MIN_HOLD_TIME_SECONDS', 13),
     websocketWatchdogIntervalMs: numberFromEnv('WEBSOCKET_WATCHDOG_INTERVAL_MS', 30_000),
     websocketStaleThresholdMs: numberFromEnv('WEBSOCKET_STALE_THRESHOLD_MS', 90_000),
     stopLossPct: numberFromEnv('STOP_LOSS_PCT', preset.stopLossPct),
@@ -511,6 +512,8 @@ function validateStartupConfig(config = null) {
     'mintSignalMaxAttempts',
     'mintSignalRetryDelayMs',
     'rpcIndexingRetryDelayMs',
+    'maxRecheckAttempts',
+    'borderlineRecheckMaxAttempts',
   ];
   for (const field of positiveFields) {
     const value = Number(config[field]);

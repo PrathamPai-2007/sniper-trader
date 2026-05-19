@@ -25,11 +25,15 @@ keypair.json
 
 # Local notes and generated docs
 GEMINI.md
+AGENTS.md
 
 # Build and coverage output
 dist/
-build/
 coverage/
+
+# Analysis outputs
+analysis-results.json
+mock-trade*.jsonl
 *.lcov
 
 # Editor and IDE files
