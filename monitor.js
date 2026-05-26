@@ -3,8 +3,8 @@
 // Position risk manager: evaluates exit conditions (SL/TP/trailing/liquidity/time),
 // executes sells, updates PnL accounting, and maintains trading mood controls.
 
-const { setTimeout: sleep } = require('node:timers/promises');
 const {
+  sleep,
   formatUsd,
   atomicToDecimalString,
   ratioToPercentString,
@@ -14,6 +14,7 @@ const {
   journalPaperTrade,
   journalClosedTrade,
   runBoundedPool,
+  PRIORITY,
 } = require('./utils');
 const { constants } = require('./config');
 const trading = require('./trading');
@@ -44,15 +45,7 @@ const TP_PROFILE_DEFAULTS = {
 };
 
 function incrementExitReasonMetric(ctx, reason) {
-  if (!ctx?.state?.metrics) return;
-  if (
-    !ctx.state.metrics.exitReasonCounts ||
-    typeof ctx.state.metrics.exitReasonCounts !== 'object'
-  ) {
-    ctx.state.metrics.exitReasonCounts = {};
-  }
-  ctx.state.metrics.exitReasonCounts[reason] =
-    (ctx.state.metrics.exitReasonCounts[reason] || 0) + 1;
+  ctx.store.incrementExitReason(reason);
 }
 
 /**
@@ -81,9 +74,7 @@ async function executePositionExit(ctx, pos, balance, pUsd, sellRaw, reason, tar
     );
     const remain = balance.rawAmount - sellRaw;
     const accounting = buildExitAccounting(pos, sellRaw, balance.rawAmount, quote.grossUsdValue);
-    ctx.state.paperSolBalanceLamports = (
-      BigInt(ctx.state.paperSolBalanceLamports) + quote.outAmount
-    ).toString();
+    ctx.store.updatePaperSolBalance(BigInt(ctx.state.paperSolBalanceLamports) + quote.outAmount);
     if (reason.startsWith('take-profit')) pos.targetsHit++;
     pos.lastTakeProfitAt = new Date().toISOString();
     pos.lastTakeProfitMultiple = targetM;
@@ -93,18 +84,17 @@ async function executePositionExit(ctx, pos, balance, pUsd, sellRaw, reason, tar
     pos.realizedPnlUsd = (pos.realizedPnlUsd || 0) + accounting.realizedPnlUsd;
     pos.realizedProceedsUsd = (pos.realizedProceedsUsd || 0) + quote.grossUsdValue;
     pos.lastExitReason = reason;
-    if (remain > 0n) ctx.state.positions.set(pos.mint, pos);
+    if (remain > 0n) ctx.store.upsertPosition(pos);
     else {
-      ctx.state.positions.delete(pos.mint);
+      ctx.store.removePosition(pos.mint);
       const win = pos.realizedPnlUsd > 0;
       recordTradeResult(ctx, win);
       recordClosedTrade(ctx, pos, reason);
-      if (win) ctx.state.metrics.profitableTrades++;
-      if (reason === 'stop-loss') ctx.state.metrics.stopLosses++;
-      if (reason === 'tp-trailing-max-exit') ctx.state.metrics.trailingExits++;
+      if (win) ctx.store.incrementMetric('profitableTrades');
+      if (reason === 'stop-loss') ctx.store.incrementMetric('stopLosses');
+      if (reason === 'tp-trailing-max-exit') ctx.store.incrementMetric('trailingExits');
     }
     incrementExitReasonMetric(ctx, reason);
-    ctx.persistState();
     journalPaperTrade(ctx, {
       event: remain > 0n ? 'sell' : 'close',
       mint: pos.mint,
@@ -154,18 +144,17 @@ async function executePositionExit(ctx, pos, balance, pUsd, sellRaw, reason, tar
     : TAKE_PROFIT_MULTIPLES.length;
   if (pos.targetsHit >= totalT || upBal.rawAmount <= 0n) {
     if (upBal.rawAmount <= 0n) {
-      ctx.state.positions.delete(pos.mint);
+      ctx.store.removePosition(pos.mint);
       const win = pos.realizedPnlUsd > 0;
       recordTradeResult(ctx, win);
       recordClosedTrade(ctx, pos, reason);
-      if (win) ctx.state.metrics.profitableTrades++;
-      if (reason === 'stop-loss') ctx.state.metrics.stopLosses++;
-      if (reason === 'tp-trailing-max-exit') ctx.state.metrics.trailingExits++;
+      if (win) ctx.store.incrementMetric('profitableTrades');
+      if (reason === 'stop-loss') ctx.store.incrementMetric('stopLosses');
+      if (reason === 'tp-trailing-max-exit') ctx.store.incrementMetric('trailingExits');
       startCoolDown(ctx, pos.mint, pUsd);
-    } else ctx.state.positions.set(pos.mint, pos);
-  } else ctx.state.positions.set(pos.mint, pos);
+    } else ctx.store.upsertPosition(pos);
+  } else ctx.store.upsertPosition(pos);
   incrementExitReasonMetric(ctx, reason);
-  ctx.persistState();
   const pnlUsd = acc.realizedPnlUsd;
   const roi = (pnlUsd / Number(pos.entryUsdValue)) * 100;
   const msg = `📉 <b>EXIT: ${pos.symbol}</b>\nReason: ${reason}\nPrice: ${formatUsd(pUsd)}\nPnL: ${formatUsd(pnlUsd)} (${roi.toFixed(2)}%)`;
@@ -301,7 +290,7 @@ function getMoodAdjustments(ctx) {
         : 1;
     if (winRate10 < MOOD_THRESHOLDS.winRateCritical) {
       isPaused = true;
-      ctx.state.moodPauseUntil = Date.now() + ctx.config.moodPauseDurationMinutes * 60000;
+      ctx.store.pauseMood(ctx.config.moodPauseDurationMinutes * 60000);
       ctx.logger(
         `Daily Mood: CRITICAL. Pausing for ${ctx.config.moodPauseDurationMinutes}m.`,
         'warn',
@@ -316,14 +305,10 @@ function getMoodAdjustments(ctx) {
 }
 
 function recordTradeResult(ctx, isWin) {
-  ctx.state.tradeHistory.push(isWin);
-  if (ctx.state.tradeHistory.length > 50) ctx.state.tradeHistory.shift();
-  ctx.persistState();
+  ctx.store.addTradeResult(isWin);
 }
 
 function recordClosedTrade(ctx, pos, reason) {
-  if (!ctx?.state) return;
-  if (!Array.isArray(ctx.state.closedTrades)) ctx.state.closedTrades = [];
   const openedAtMs = new Date(pos.openedAt || Date.now()).getTime();
   const trade = {
     mint: pos.mint,
@@ -348,7 +333,7 @@ function recordClosedTrade(ctx, pos, reason) {
     targetsHit: Number(pos.targetsHit || 0),
     initialBuyAmountSol: pos.initialBuyAmountSol || null,
   };
-  ctx.state.closedTrades.push(trade);
+  ctx.store.addClosedTrade(trade);
   journalClosedTrade(ctx, trade);
 }
 
@@ -364,7 +349,7 @@ function getTrailingActivationMultiple(pos) {
 
 function startCoolDown(ctx, mint, pUsd) {
   const expires = Date.now() + ctx.config.coolDownMinutes * 60000;
-  ctx.state.coolDownMints.set(mint, { expiresAt: expires, lastExitPriceUsd: pUsd });
+  ctx.store.startCoolDown(mint, pUsd, expires);
 }
 
 async function monitorPositions(ctx, fetchPricesBestEffort) {
@@ -385,8 +370,7 @@ async function monitorPositions(ctx, fetchPricesBestEffort) {
       let balance = await trading.getWalletTokenBalance(ctx, mint);
       if (balance.rawAmount <= 0n) {
         ctx.logger(`Position ${pos.symbol} zero balance; removing.`, 'warn');
-        ctx.state.positions.delete(mint);
-        ctx.persistState();
+        ctx.store.removePosition(mint);
         return;
       }
 
@@ -401,7 +385,7 @@ async function monitorPositions(ctx, fetchPricesBestEffort) {
           snap.liquidity = pRecord.liquidity;
           snap.usdPrice = pUsd;
           snap.observedAt = new Date().toISOString();
-          ctx.state.marketSnapshots.set(mint, snap);
+          ctx.store.updateMarketSnapshot(mint, snap);
         }
       } else if (snap?.liquidity != null) {
         pos.lastKnownLiquidityUsd = snap.liquidity;
@@ -453,13 +437,13 @@ async function monitorPositions(ctx, fetchPricesBestEffort) {
         pos.spreadHistory = pos.spreadHistory.filter((h) => h.timestamp > cutoff);
       }
 
-      ctx.state.positions.set(mint, pos);
+      ctx.store.upsertPosition(pos);
 
       // Periodic Security Re-Audit (detecting delayed authorities/freeze) & Holder Drift
       if (!pos.lastSecurityAuditAt || Date.now() - pos.lastSecurityAuditAt > 30000) {
         pos.lastSecurityAuditAt = Date.now();
         try {
-          const signals = await audit.getMintSignals(ctx, mint, { priority: 0 }); // Low priority
+          const signals = await audit.getMintSignals(ctx, mint, { priority: PRIORITY.LOW });
 
           // 1. Rug Detection
           if (signals.mintAuthority || signals.freezeAuthority) {
@@ -618,7 +602,7 @@ async function monitorPositions(ctx, fetchPricesBestEffort) {
           'warn',
           { console: true }
         );
-        ctx.state.positions.set(mint, pos);
+        ctx.store.upsertPosition(pos);
       }
       if (pUsd <= slP) {
         await executePositionExit(ctx, pos, balance, pUsd, balance.rawAmount, 'stop-loss');
@@ -635,7 +619,7 @@ async function monitorPositions(ctx, fetchPricesBestEffort) {
         const activationMultiple = getTrailingActivationMultiple(pos);
         if (pUsd >= pos.entryPriceUsd * activationMultiple) {
           pos.trailingArmed = true;
-          ctx.state.positions.set(mint, pos);
+          ctx.store.upsertPosition(pos);
         }
       }
 
@@ -690,7 +674,7 @@ async function monitorPositions(ctx, fetchPricesBestEffort) {
         const last = pos.spreadHistory[pos.spreadHistory.length - 1];
         const prev = pos.spreadHistory[pos.spreadHistory.length - 2];
         const timeDiff = (last.timestamp - prev.timestamp) / 1000;
-        if (timeDiff <= 15) {
+        if (timeDiff <= 15 && prev.spread > 0) {
           const spreadIncrease = last.spread / prev.spread - 1;
           if (spreadIncrease > 0.5) {
             ctx.logger(
@@ -756,6 +740,7 @@ async function monitorPositions(ctx, fetchPricesBestEffort) {
         pos.minTpReached = false;
         pos.minTpFirstReachedAt = null;
         pos.minTpArmed = false;
+        ctx.store.upsertPosition(pos);
       }
     },
     { concurrency: ctx.config.scanParallelismLight || 5 }
@@ -781,11 +766,10 @@ async function closeAllOpenPositions(ctx, fetchPricesBestEffort, reason = 'shutd
     try {
       const bal = await trading.getWalletTokenBalance(ctx, mint);
       if (bal.rawAmount <= 0n) {
-        ctx.state.positions.delete(mint);
-        ctx.persistState();
+        ctx.store.removePosition(mint);
         continue;
       }
-      let p = Number(prices[mint]?.usdPrice || pos.lastKnownPriceUsd || pos.entryPriceUsd || 0);
+      const p = Number(prices[mint]?.usdPrice || pos.lastKnownPriceUsd || pos.entryPriceUsd || 0);
       await executePositionExit(ctx, pos, bal, p, bal.rawAmount, reason);
     } catch (e) {
       ctx.logger(`Failed to close ${pos.symbol || mint}: ${e.message}`, 'error', { console: true });

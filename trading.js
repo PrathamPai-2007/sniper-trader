@@ -99,7 +99,7 @@ async function fetchDynamicPriorityFee(ctx, accountKeys = [], isPanic = false) {
 
     const sortedFees = fees.map((f) => f.prioritizationFee).sort((a, b) => a - b);
     const index = Math.floor((ctx.config.priorityFeePercentile / 100) * (sortedFees.length - 1));
-    let baseFee = sortedFees[index];
+    const baseFee = sortedFees[index];
 
     let finalFee = Math.max(ctx.config.priorityFeeBaseMicroLamports, baseFee);
     if (isPanic) {

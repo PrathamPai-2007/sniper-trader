@@ -3,9 +3,9 @@
 // Service composition layer: wraps data fetches, candidate evaluation, buy execution,
 // and shared flow helpers used by the bot's discovery and monitoring loops.
 
-const { setTimeout: sleep } = require('node:timers/promises');
 const utils = require('./utils');
 const {
+  sleep,
   fetchJson,
   atomicToDecimalString,
   decimalToAtomic,
@@ -281,7 +281,7 @@ module.exports = {
    * @returns {Promise<Object|null>} The newly opened position object or null if the buy failed/was skipped.
    */
   buyCandidate: async (ctx, evaluation, prefetchedQuotePromise = null) => {
-    ctx.state.metrics.buyAttempts++;
+    ctx.store.incrementMetric('buyAttempts');
     const { token, candidateScore } = evaluation;
     const decimals = Number(
       token.decimals || (evaluation.mintSignals ? evaluation.mintSignals.decimals : 0) || 0
@@ -309,9 +309,7 @@ module.exports = {
           return null;
         }
         const quote = await trading.buildPaperBuyQuote(ctx, token, decimals, buyLamports);
-        ctx.state.paperSolBalanceLamports = (
-          BigInt(ctx.state.paperSolBalanceLamports) - buyLamports
-        ).toString();
+        ctx.store.updatePaperSolBalance(BigInt(ctx.state.paperSolBalanceLamports) - buyLamports);
         const pos = {
           mint: token.id,
           symbol: token.symbol,
@@ -371,8 +369,7 @@ module.exports = {
             ctx.logger(`Failed to save stats file at ${statsFilePath}: ${err.message}`, 'error')
           );
 
-        ctx.state.positions.set(token.id, pos);
-        ctx.persistState();
+        ctx.store.upsertPosition(pos);
         journalPaperTrade(ctx, {
           event: 'buy',
           mint: token.id,
@@ -481,8 +478,7 @@ module.exports = {
         .catch((err) =>
           ctx.logger(`Failed to save stats file at ${statsFilePath}: ${err.message}`, 'error')
         );
-      ctx.state.positions.set(token.id, pos);
-      ctx.persistState();
+      ctx.store.upsertPosition(pos);
       const msg = `🚀 <b>BUY: ${token.symbol}</b>\nScore: ${candidateScore}\nAmount: ${buySolText} SOL\nPrice: ${formatUsd(entryPriceUsd)}`;
       await sendNotification(ctx, msg);
       ctx.logger(
@@ -491,7 +487,7 @@ module.exports = {
       );
       return pos;
     } catch (e) {
-      ctx.state.metrics.buyFailures++;
+      ctx.store.incrementMetric('buyFailures');
       ctx.logger(`Buy failed for ${token.symbol || token.id}: ${e.message}`, 'error');
       return null;
     }

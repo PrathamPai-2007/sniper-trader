@@ -15,44 +15,38 @@
 
 Veloci-Buy is built on a decoupled, service-oriented architecture that prioritizes modularity and low-latency execution:
 
-- **Orchestration (`bot.js`)**: Manages the high-precision loop watchdogs and system lifecycle.
-- **Event Ingestion (`discovery.js`)**: A high-speed pipeline for real-time monitoring of Pump.fun, Raydium, and Meteora program logs.
+- **Orchestration (`bot.js`)**: Manages the high-precision loop watchdogs, system lifecycle, and global event coordination.
+- **Scanner Service (`scanner.js`)**: Handles candidate identification, multi-stage audit scheduling, and re-audit logic for tokens discovered via polling or WebSocket.
+- **Event Ingestion (`discovery.js`)**: A high-speed pipeline for real-time monitoring of program logs. Features direct log parsing for sub-second discovery.
 - **Heuristic Decision Engine (`engine.js`)**: Filters candidates through complex scoring models, including momentum analysis and survival timeframes.
 - **Security Audit Suite (`audit.js`)**: Performs deep on-chain inspection of mint/freeze authorities and holder concentration, integrated with external security signals.
 - **Parallel Execution Adapter (`trading.js`)**: A zero-wait Jupiter integration that pre-builds transactions during the audit phase to shave hundreds of milliseconds off execution.
 - **Risk Management (`monitor.js`)**: Automated position monitoring with dynamic TP/SL execution and trailing drawdown protection.
-- **Trade Replay Analyzer (`analyze.js`)**: Post-session analysis engine that ingests paper trade journals, reconstructs price paths, and runs exhaustive parameter grid scans to optimize strategy configuration.
+- **State Management (`store.js`)**: Centralized state store with incremental persistence to keep the event loop responsive during high-frequency operations.
 
 ---
 
-## Key Innovations (v2.0)
+## Key Innovations (v2.x)
 
-### Zero-Wait Sniping Architecture
+### Sub-Second Discovery Engine
 
-The v2.0 engine implements **Parallel Quote Pre-fetching**. While the security audit performs deep-dive account inspections, the trading module simultaneously fetches Jupiter swap quotes. This ensures that the moment a token passes the final audit gate, a pre-signed transaction is ready for immediate broadcast.
+The bot now parses program logs directly for **Pump.fun**, extracting mint addresses the instant they are created. This bypasses the traditional 200ms–1s RPC indexing lag required for full transaction lookups, ensuring your bot sees the token before it even appears on most scanners.
 
-### Scalable Multi-RPC Load Balancing
+### Batch Audit Inspection
 
-Support for a round-robin RPC pool architecture. By distributing requests across multiple providers (e.g., Helius, QuickNode, Triton), the bot maximizes throughput and eliminates provider-level rate limit bottlenecks.
+By utilizing `getMultipleAccounts` for holder and authority audits, the bot consolidates dozens of RPC calls into a single high-speed request. This drastically reduces the "Full Audit" duration, which is critical for winning competitive snipes in low-liquidity environments.
 
-### Priority-Aware Rate Limiting
+### Smart RPC Failover & Health Tracking
 
-A sophisticated 4-tier queuing system ensures that critical execution tasks (signature confirmation, transaction broadcast) always take precedence over background discovery and metadata fetching.
+A new unified RPC provider layer tracks the health of every endpoint in your pool. If a provider degrades or hits a rate limit, the bot automatically fails over to the next healthy candidate in real-time, ensuring zero downtime during volatile market conditions.
 
-### Dynamic Trade Management
+### API Circuit Breakers & Fail-Safe Logic
 
-The bot now utilizes **Score-Based Profiles** to manage open positions. High-confidence candidates are granted wider trailing stops to capture parabolic moves, while lower-confidence entries utilize tight risk controls to lock in profits early.
+The security pipeline is now resilient to external API outages. If GoPlus or BubbleMaps experience downtime or timeouts, the bot automatically switches to stricter **Local On-Chain Heuristics**, protecting your capital even when third-party services fail.
 
-### Trade Replay & Parameter Optimization
+### Incremental State Persistence
 
-The `analyze.js` module provides a **Post-Session Replay Engine** that enables data-driven strategy tuning:
-
-- **Journal Ingestion**: Reads `trade-journal.jsonl` and `paper-trade-journal.jsonl` from isolated session directories to reconstruct every trade's lifecycle.
-- **Price Path Reconstruction**: Infers realistic price trajectories (entry → highest → exit) from recorded trade metadata.
-- **7-Parameter Grid Scan**: Exhaustively evaluates 9,216 combinations across stop loss, trailing drawdown, take profit multiples/fraction, early performance triggers, and max hold time.
-- **Rejection Funnel Analysis**: Aggregates audit rejection reasons across sessions to identify the most common filters blocking entries.
-
-Run `node analyze.js` after a paper trading session to receive ranked parameter recommendations and per-parameter sensitivity analysis.
+To maintain peak performance during long sessions, the bot utilizes a dual-track persistence model. Active trading state is saved frequently, while bulky historical data is offloaded lazily, preventing event loop "stutters" that can cause execution delays.
 
 ---
 
@@ -101,26 +95,103 @@ npm run ci
 Veloci-Buy is maintained with high engineering standards to ensure reliability in volatile markets:
 
 - **Atomic State Persistence**: Custom `atomicWriteFile` utility ensures state files remain corruption-proof on all operating systems.
+- **Dynamic Syntax Validation**: Recursive syntax validator (`check-syntax.js`) scans all JavaScript files automatically without requiring manual updates to package scripts.
+- **Hardened ESLint Rules**: Strictly enforces `'use strict';` global declarations, modern block scoping (`no-var`, `prefer-const`), strict type-safe equality (`===`), and variable shadowing protection.
 - **Comprehensive Testing**: A full suite of unit and integration tests covering the entire trading lifecycle.
-- **CI Pipeline**: Automated dependency audit, syntax, linting, formatting, and test validation on every commit.
+- **CI Pipeline**: Automated dependency audit, dynamic syntax checking, hardened linting, formatting, and test validation on every commit.
 
 ---
 
-## Verification & Test Coverage
+## Verification & Modular Test Suite
 
-The system is backed by a comprehensive validation suite covering critical path operations:
+Veloci-Buy uses a robust, modular test suite leveraging Node's native `node:test` runner. The monolithic `tests.js` has been refactored into focused files under the `tests/` directory:
 
-- **Engine Heuristics**: Candidate scoring from socials, liquidity tiers, launchpad profile bonuses, GMI-driven entry score adjustment, ATH protection logic, FDV-to-liquidity safety gates, and reduced-fidelity historical snapshot handling.
-- **Bot Orchestration**: Score-based survival delay tiers, holder-count waitlists, indexing-lag retry caps, disabled-borderline behavior, and automated pullback recheck cancellation when price deterioration exceeds the configured threshold.
-- **Execution Reliability**: Jupiter price payload normalization, per-mint fallback price lookups, explicit Jupiter API-key selection, paper round trips, live dry-run balance inspection, live swap bookkeeping, nested BigInt audit metadata persistence, and buy failure accounting.
-- **Audit Resilience**: Mint-signal indexing-lag retries stop at the configured attempt limit instead of looping indefinitely.
-- **Risk Management**: Mood-based sizing pauses, score-based trade profiles, take-profit fraction math, volatility-scaled stop-loss calculations, insider drift detection helpers, immediate stop-loss and liquidity exits before minimum hold time, and time-exit minimum-hold gating.
-- **Quant Strategy Helpers**: GMI aggression changes, volatility-scaler stop-loss math, insider drift holder-delta detection, and spread/standard-deviation utility calculations.
-- **Infrastructure**: Bounded concurrency ordering, standard deviation and spread utilities, pump.fun curve decoding, startup validation for explicit live-trading arming, and Windows-safe atomic file persistence.
+- **[tests/\_test_helpers.js](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/tests/_test_helpers.js)**: Reusable configurations, sandbox context states, `fetch` mockers, member patchers, and state seeds.
+- **[tests/engine.test.js](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/tests/engine.test.js)**: Evaluates decision engine scoring, GMI aggro modifications, memecoin filter matching, and candidate evaluation buffers.
+- **[tests/scanner.test.js](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/tests/scanner.test.js)**: Tests event schedules, survival delay tiers, indexing-lag wait caps, and slot reservations.
+- **[tests/services.test.js](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/tests/services.test.js)**: Exercises the high-level trade lifecycle including paper swaps, dry-runs, and token balance queries.
+- **[tests/audit.test.js](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/tests/audit.test.js)**: Exercises token authority safety audits, indexing lag retries, and GoPlus address scanning.
+- **[tests/monitor.test.js](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/tests/monitor.test.js)**: Focuses on dynamic TP/SL execution, volatility stop-loss bounds, insider drift, and emergency exits.
+- **[tests/config.test.js](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/tests/config.test.js)**: Validates startup constraints, live trading safety checks, and invalid bounds rejection.
+- **[tests/utils.test.js](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/tests/utils.test.js)**: Covers Windows EPERM write retries, safe JSON serialization, standard deviation, and curve decoders.
+
+### Run Commands
+
+```bash
+# Run all modular tests
+npm test
+
+# Run dynamic syntax verification on all JS files
+npm run check
+
+# Verify coding guidelines using strict linter
+npm run lint
+
+# Validate Prettier formatting
+npm run format:check
+
+# Format all files in-place using Prettier
+npm run format
+
+# Run complete CI validation pipeline (audit -> check -> lint -> format:check -> test)
+npm run ci
+```
+
+---
+
+## Configuration Optimization (`node analyze.js`)
+
+To optimize the exit strategy parameters of your trading engine, Veloci-Buy includes a post-session **Trade Replay Analyzer** ([analyze.js](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/analyze.js)). This tool acts as a local parameter optimizer, backtesting historical trading journals across thousands of strategy permutations to isolate the highest-performing configurations.
+
+### How It Works
+
+1. **Trade Replay Ingestion**: The optimizer scans `logs/paper-trading/` to reconstruct complete historical trades from session journals (`paper-trade-journal.jsonl`, `trade-journal.jsonl`, and `metrics.json`).
+2. **Synthetic Price Path Reconstruction**: Since full ticks can be storage-heavy, the engine reconstructs a synthetic price curve for each trade (`entryPriceUsd` → `highestPriceUsd` → `actualExitPrice`) mapped against the actual trade duration.
+3. **Multi-Parameter Grid Search**: It replays each trade through a 7-parameter grid mapping **9,216 distinct exit rule configurations**:
+   - `stopLossPct`: `[0.1, 0.15, 0.2, 0.25]` (10% to 25% Stop Loss)
+   - `trailingDrawdownPct`: `[0.1, 0.15, 0.2, 0.25]` (Trailing Drawdown exit buffer)
+   - `takeProfitMultiples`: `[[1.5], [1.3, 2.0], [1.5, 2.5]]` (1 target, 2 targets, etc.)
+   - `takeProfitFraction`: `[0.5, 0.6, 0.75]` (What percentage of position to sell at each target)
+   - `earlyPerformanceDropPct`: `[5, 10, 15, 20]` (Trigger for early performance guard)
+   - `earlyPerformanceSellPct`: `[40, 60, 80, 100]` (Fraction to exit early if stalling)
+   - `maxHoldMinutes`: `[10, 20, 30, 60]` (Maximum time-based hold durations)
+4. **Calculated Metrics**: Each configuration combo is ranked based on:
+   - **Win Rate (%)**
+   - **Profit Factor** (Gross profit divided by gross loss)
+   - **Average PnL per trade**
+   - **Max Drawdown** (Maximum single trade loss)
+   - **Total PnL** (Overall profitability)
+
+### Usage
+
+Replay and optimize your historical paper trading configurations by running:
+
+```bash
+node analyze.js
+```
+
+The console will display the overall sessions ingested, total trades, grid combos processed, and output the **top 10 configurations** ranked by profit factor and overall PnL, highlighting exactly which parameter values to adjust in your strategy config.
 
 ---
 
 ## Changelog
+
+### v2.x - Code Quality & Maintainability Milestone
+
+- **Dynamic Syntax Validation**: Introduced recursive `check-syntax.js` validator, ensuring no JS file bypasses CI syntax checks.
+- **Strict ESLint Rules**: Enforced `'use strict';` global declarations, modern block scoping (`no-var`, `prefer-const`), strict type-safe equality (`===`), and variable shadowing protection.
+- **Codebase Cleanups**: Fixed shadowing bugs in `audit.js` and `utils.js`, converted unassigned variables to `const` in `discovery.js`, `monitor.js`, and `trading.js`.
+- **Prettier Dev Commands**: Added `npm run format` for developer ergonomics to format in-place.
+
+### v2.x - Performance & Reliability Milestone
+
+- **Sub-Second Discovery**: Optimized `discovery.js` with direct Pump.fun log parsing, bypassing RPC indexing lag.
+- **Decoupled Orchestrator**: Extracted scanning and scheduling logic into a dedicated `scanner.js` service for better modularity.
+- **Batch Audit Inspection**: Refactored `audit.js` to use `getMultipleAccounts`, reducing audit latency by consolidating RPC requests.
+- **Smart RPC Failover**: Implemented a unified RPC provider layer with real-time health tracking and automatic failover.
+- **API Circuit Breakers**: Added fail-safe modes for GoPlus and BubbleMaps to handle external API outages gracefully.
+- **Incremental Persistence**: Refactored `store.js` to split state into frequent and lazy files, ensuring event loop responsiveness.
+- **Granular WS Watchdog**: Enhanced WebSocket monitoring to track activity on a per-program basis, improving failure detection.
 
 ### v2.x - Trade Replay Analyzer & Logging Enhancements
 

@@ -1,3 +1,5 @@
+'use strict';
+
 // ESLint flat config for project-wide JS linting in CommonJS runtime.
 const js = require('@eslint/js');
 
@@ -28,13 +30,27 @@ module.exports = [
       },
     },
     rules: {
+      strict: ['error', 'global'],
+      eqeqeq: ['error', 'always', { null: 'ignore' }],
+      'no-var': 'error',
+      'prefer-const': 'error',
       'no-undef': 'error',
-      'no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+      'no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
       'no-constant-condition': ['error', { checkLoops: false }],
       'no-empty': 'off',
       'no-useless-assignment': 'off',
       'no-unsafe-optional-chaining': 'off',
       'preserve-caught-error': 'off',
+      'no-shadow': 'error',
+      'no-new-wrappers': 'error',
+      'no-eval': 'error',
+      'no-implied-eval': 'error',
+      radix: 'error',
+      'no-self-compare': 'error',
+      'no-duplicate-imports': 'error',
+      'no-template-curly-in-string': 'error',
+      'array-callback-return': 'error',
+      'no-sequences': 'error',
     },
   },
 ];

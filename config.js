@@ -123,6 +123,7 @@ const METEORA_DLMM_PROGRAM_ID = address('LBUZPB6S7GrLs9haYv94LMc6Zz21U9F7r5Q7oJC
 
 const INITIALIZE_MINT_LOG_PATTERN = /Instruction:\s+InitializeMint2?/i;
 const PUMP_FUN_CREATE_LOG_PATTERN = /Instruction:\s+Create/i;
+const PUMP_FUN_MINT_LOG_PATTERN = /Program log:\s+Create\s+\{.*mint:\s*([\w\d]+)/i;
 const RAYDIUM_INIT_LOG_PATTERN = /Instruction:\s+(?:Initialize2|Monitor)/i;
 const METEORA_INIT_LOG_PATTERN = /Instruction:\s+(?:Initialize|CreateLbPair)/i;
 
@@ -615,6 +616,7 @@ module.exports = {
     METEORA_DLMM_PROGRAM_ID,
     INITIALIZE_MINT_LOG_PATTERN,
     PUMP_FUN_CREATE_LOG_PATTERN,
+    PUMP_FUN_MINT_LOG_PATTERN,
     RAYDIUM_INIT_LOG_PATTERN,
     METEORA_INIT_LOG_PATTERN,
     DISCOVERY_SIGNAL_RETENTION_MS,

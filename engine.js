@@ -501,13 +501,29 @@ async function evaluateCandidate(
     );
 
   if (goPlusSignals) {
-    goPlusSignals.blockers.forEach((b) => addBlocker(b, 'goplus-token-signal'));
-    notes.push(...goPlusSignals.notes);
+    if (goPlusSignals.status === 'ok') {
+      goPlusSignals.blockers.forEach((b) => addBlocker(b, 'goplus-token-signal'));
+      notes.push(...goPlusSignals.notes);
+    } else {
+      notes.push(`GoPlus audit skipped (${goPlusSignals.status}). Relying on on-chain signals.`);
+    }
   }
 
   if (bbSignals) {
-    bbSignals.blockers.forEach((b) => addBlocker(b, 'bubblemaps-signal'));
-    if (bbSignals.score != null) notes.push(`BubbleMaps score: ${bbSignals.score}`);
+    if (bbSignals.status === 'ok') {
+      bbSignals.blockers.forEach((b) => addBlocker(b, 'bubblemaps-signal'));
+      if (bbSignals.score != null) notes.push(`BubbleMaps score: ${bbSignals.score}`);
+    } else {
+      notes.push(
+        `BubbleMaps audit skipped (${bbSignals.status}). Applying stricter concentration checks.`
+      );
+      if (mintSignals.top5Share > (ctx.config.maxTokenAccountTop5Pct - 10) / 100) {
+        addBlocker(
+          `BubbleMaps down and top5 concentration ${ratioToPercentString(mintSignals.top5Share)} is borderline.`,
+          'bubblemaps-fail-safe-concentration'
+        );
+      }
+    }
   }
 
   // Address-based malicious owner check (depends on mintSignals)

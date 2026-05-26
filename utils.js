@@ -282,7 +282,19 @@ function isTransientOperationError(error) {
 }
 
 const https = require('node:https');
-const { setTimeout: sleep } = require('node:timers/promises');
+
+/**
+ * Sleeps for a given number of milliseconds.
+ * Bypassable during tests.
+ * @param {number} ms - The sleep duration.
+ * @returns {Promise<void>}
+ */
+async function sleep(ms) {
+  if (global.__TEST__ || process.env.NODE_ENV === 'test') {
+    return;
+  }
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 // ---------------------------------------------------------------------------
 // RPC rate limiters — hard limits imposed by the RPC provider.
@@ -364,7 +376,7 @@ function makePriorityTokenBucket(ratePerSec) {
     refill();
     while (tokens >= 1) {
       const p = [PRIORITY.ULTRA_HIGH, PRIORITY.HIGH, PRIORITY.MEDIUM, PRIORITY.LOW].find(
-        (p) => queues[p].length > 0
+        (pri) => queues[pri].length > 0
       );
       if (p === undefined) break;
 
@@ -409,6 +421,7 @@ try {
   });
 } catch {}
 
+const rpcHealth = new Map(); // index -> { errorCount, lastErrorAt }
 let _rpcIndex = 0;
 
 /**
@@ -435,26 +448,53 @@ async function rpcCall(ctx, method, params = [], options = {}) {
     if (cached !== null) return cached;
   }
 
-  const rpcs = Array.isArray(ctx.rpcs) ? ctx.rpcs : [ctx.rpc];
+  const rpcPool = Array.isArray(ctx.rpcs) && ctx.rpcs.length > 0 ? ctx.rpcs : [ctx.rpc];
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const now = Date.now();
+
+    // Select candidates: prefer those not recently failed or failed too many times
+    let candidates = rpcPool
+      .map((rpc, index) => ({ rpc, index }))
+      .filter(({ index }) => {
+        const health = rpcHealth.get(index) || { errorCount: 0, lastErrorAt: 0 };
+        return health.errorCount < 3 || now - health.lastErrorAt > 60000;
+      });
+
+    if (candidates.length === 0) {
+      candidates = rpcPool.map((rpc, index) => ({ rpc, index }));
+    }
+
+    const { rpc, index } = candidates[_rpcIndex % candidates.length];
+    _rpcIndex++;
+
     try {
       if (method === 'sendTransaction') {
         await acquireSendTxToken(PRIORITY.ULTRA_HIGH);
       }
       await acquireRpcToken(priority);
 
-      // Round-robin selection of RPC client
-      const rpc = rpcs[_rpcIndex % rpcs.length];
-      _rpcIndex++;
-
       const result = await rpc[method](...params).send();
+
+      // Success: Reset health for this endpoint
+      rpcHealth.set(index, { errorCount: 0, lastErrorAt: 0 });
+
       if (cacheKey) rpcCache.set(cacheKey, result, cacheTtlMs);
       return result;
     } catch (e) {
       lastError = e;
+
+      // Record failure
+      const health = rpcHealth.get(index) || { errorCount: 0, lastErrorAt: 0 };
+      health.errorCount++;
+      health.lastErrorAt = now;
+      rpcHealth.set(index, health);
+
       if (isTransientOperationError(e) && attempt < maxAttempts - 1) {
-        await sleep(1000 * (attempt + 1));
+        // If we have other candidates, retry immediately with another one
+        if (candidates.length > 1) continue;
+
+        await sleep(500 * (attempt + 1));
         continue;
       }
       throw e;
@@ -816,4 +856,5 @@ module.exports = {
   decodeRaydiumPool,
   computeStandardDeviation,
   computeSpread,
+  sleep,
 };

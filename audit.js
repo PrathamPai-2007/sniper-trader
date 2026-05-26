@@ -4,8 +4,8 @@
 // and integrates GoPlus/BubbleMaps checks to enrich candidate risk decisions.
 
 const { address } = require('@solana/addresses');
-const { setTimeout: sleep } = require('node:timers/promises');
 const {
+  sleep,
   rpcCall,
   fetchJson,
   ratioToPercentString,
@@ -126,36 +126,35 @@ async function getMintSignals(ctx, mint, options = {}) {
 
   const top1Share = topAccounts[0]?.share || 0;
   const top5Share = topAccounts.slice(0, 5).reduce((sum, account) => sum + account.share, 0);
-  const ownerConcurrency = Math.max(1, Math.floor(Number(ctx.config.ownerAuditParallelism || 2)));
-  const ownerResults = await runBoundedPool(
-    topAccounts,
-    async (account) => {
-      try {
-        const ownerInfo = await rpcCall(
-          ctx,
-          'getAccountInfo',
-          [
-            address(account.address),
-            {
-              encoding: 'jsonParsed',
-              commitment: 'confirmed',
-            },
-          ],
-          { priority, cacheTtlMs: 10000 }
-        );
-        const owner = ownerInfo.value?.data?.parsed?.info?.owner || null;
-        return { ...account, owner };
-      } catch (e) {
-        const message = getErrorMessage(e);
-        if (message.includes('not a Token mint')) {
-          return { ...account, owner: null, ownerLookupError: 'RPC Indexing Lag' };
-        }
-        return { ...account, owner: null, ownerLookupError: message };
-      }
-    },
-    { concurrency: ownerConcurrency }
-  );
-  const ownerDetails = ownerResults.map((r) => (r.status === 'fulfilled' ? r.value : r.item));
+
+  const accountAddresses = topAccounts.map((a) => address(a.address));
+  let ownersInfo = null;
+  try {
+    ownersInfo = await rpcCall(
+      ctx,
+      'getMultipleAccounts',
+      [
+        accountAddresses,
+        {
+          encoding: 'jsonParsed',
+          commitment: 'confirmed',
+        },
+      ],
+      { priority, cacheTtlMs: 10000 }
+    );
+  } catch (e) {
+    ctx.logger(`getMultipleAccounts failed for ${mint}: ${getErrorMessage(e)}`, 'warn');
+  }
+
+  const ownerDetails = topAccounts.map((account, index) => {
+    const info = ownersInfo?.value?.[index];
+    if (info) {
+      const owner = info.data?.parsed?.info?.owner || null;
+      return { ...account, owner };
+    }
+    // If null, it likely means indexing lag or the account was closed
+    return { ...account, owner: null, ownerLookupError: 'Account info not found (possible lag)' };
+  });
 
   return {
     decimals: Number(mintInfo.decimals || 0),
@@ -176,10 +175,12 @@ async function getMintSignals(ctx, mint, options = {}) {
  */
 async function fetchGoPlusTokenSignals(ctx, mint) {
   if (!ctx.config.goPlusAccessToken) return null;
+  const timeoutMs = 8000;
   try {
     const url = `${ctx.config.goPlusBaseUrl}/solana/token_security?contract_addresses=${encodeURIComponent(mint)}`;
     const payload = await fetchJson(url, {
       headers: { Authorization: `Bearer ${ctx.config.goPlusAccessToken}` },
+      timeoutMs,
     });
     const record =
       payload?.result?.[mint] ||
@@ -187,7 +188,7 @@ async function fetchGoPlusTokenSignals(ctx, mint) {
       payload?.data?.[mint] ||
       payload?.data?.[mint.toLowerCase()] ||
       null;
-    if (!record) return null;
+    if (!record) return { status: 'no_data', blockers: [], notes: [] };
 
     const blockers = [];
     const notes = [];
@@ -202,10 +203,12 @@ async function fetchGoPlusTokenSignals(ctx, mint) {
     if (isTruthyFlag(record.trusted_token) === false && record.trusted_token !== undefined)
       notes.push('GoPlus does not mark the token as trusted');
 
-    return { blockers, notes, raw: record };
+    return { status: 'ok', blockers, notes, raw: record };
   } catch (e) {
-    ctx.logger(`GoPlus token security skipped for ${mint}: ${getErrorMessage(e)}`, 'warn');
-    return null;
+    const message = getErrorMessage(e);
+    const status = message.includes('timed out') ? 'timeout' : 'error';
+    ctx.logger(`GoPlus token security skipped for ${mint} (${status}): ${message}`, 'warn');
+    return { status, blockers: [], notes: [], error: message };
   }
 }
 
@@ -220,24 +223,25 @@ async function fetchGoPlusAddressSignals(ctx, addresses) {
   const startedAt = Date.now();
   const results = await runBoundedPool(
     addresses,
-    async (address) => {
+    async (addr) => {
       try {
-        const url = `${ctx.config.goPlusBaseUrl}/address_security/${address}?chain_id=solana`;
+        const url = `${ctx.config.goPlusBaseUrl}/address_security/${addr}?chain_id=solana`;
         const payload = await fetchJson(url, {
           headers: { Authorization: `Bearer ${ctx.config.goPlusAccessToken}` },
+          timeoutMs: 5000,
         });
         const resultRecord = payload?.result;
         const dataRecord = payload?.data;
         const record =
-          resultRecord?.[address] ||
-          resultRecord?.[address.toLowerCase()] ||
-          dataRecord?.[address] ||
-          dataRecord?.[address.toLowerCase()] ||
+          resultRecord?.[addr] ||
+          resultRecord?.[addr.toLowerCase()] ||
+          dataRecord?.[addr] ||
+          dataRecord?.[addr.toLowerCase()] ||
           (resultRecord && !Array.isArray(resultRecord) ? resultRecord : null) ||
           (dataRecord && !Array.isArray(dataRecord) ? dataRecord : null);
-        if (record && isMaliciousGoPlusAddressRecord(record)) return { address, record };
+        if (record && isMaliciousGoPlusAddressRecord(record)) return { address: addr, record };
       } catch (e) {
-        ctx.logger(`GoPlus address security skipped for ${address}: ${getErrorMessage(e)}`, 'warn');
+        ctx.logger(`GoPlus address security skipped for ${addr}: ${getErrorMessage(e)}`, 'warn');
       }
       return null;
     },
@@ -298,6 +302,7 @@ function isMaliciousGoPlusAddressRecord(record) {
  */
 async function fetchBubbleMapsSignals(ctx, mint) {
   if (!ctx.config.bubbleMapsApiKey) return null;
+  const timeoutMs = 12000;
   try {
     const params = new URLSearchParams({
       return_clusters: 'true',
@@ -308,7 +313,7 @@ async function fetchBubbleMapsSignals(ctx, mint) {
     const url = `${ctx.config.bubbleMapsBaseUrl}/maps/solana/${mint}?${params.toString()}`;
     const payload = await fetchJson(url, {
       headers: { 'X-ApiKey': ctx.config.bubbleMapsApiKey },
-      timeoutMs: 25000,
+      timeoutMs,
     });
     const largestClusterShare =
       Array.isArray(payload?.clusters) && payload.clusters.length > 0
@@ -332,14 +337,17 @@ async function fetchBubbleMapsSignals(ctx, mint) {
       );
     }
     return {
+      status: 'ok',
       blockers,
       score: payload?.decentralization_score ?? null,
       largestClusterShare,
       raw: payload,
     };
   } catch (e) {
-    ctx.logger(`BubbleMaps skipped for ${mint}: ${getErrorMessage(e)}`, 'warn');
-    return null;
+    const message = getErrorMessage(e);
+    const status = message.includes('timed out') ? 'timeout' : 'error';
+    ctx.logger(`BubbleMaps skipped for ${mint} (${status}): ${message}`, 'warn');
+    return { status, blockers: [], score: null, largestClusterShare: null, error: message };
   }
 }
 

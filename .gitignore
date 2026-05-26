@@ -30,6 +30,7 @@ AGENTS.md
 # Build and coverage output
 dist/
 coverage/
+.nyc_output/
 
 # Analysis outputs
 analysis-results.json

@@ -9,10 +9,11 @@
   },
   "scripts": {
     "start": "node bot.js",
-    "test": "node --test tests.js",
-    "check": "node --check bot.js && node --check config.js && node --check discovery.js && node --check engine.js && node --check monitor.js && node --check services.js && node --check trading.js && node --check utils.js && node --check tests.js && node --check audit.js && node --check analyze.js",
+    "test": "node --test",
+    "check": "node scripts/check-syntax.js",
     "lint": "eslint .",
     "format:check": "prettier --check .",
+    "format": "prettier --write .",
     "audit": "npm audit",
     "ci": "npm run audit && npm run check && npm run lint && npm run format:check && npm test"
   },
