@@ -1,0 +1,1116 @@
+warning: in the working copy of '.github/workflows/ci.yml', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'analyze.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'package-lock.json', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/core/store.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/services/engine/engine.service.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/services/monitor/monitor.service.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/services/services.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/services/trading/trading.service.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/types/index.ts', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml[m
+[1mindex 0cc7e88..0c3dc14 100644[m
+[1m--- a/.github/workflows/ci.yml[m
+[1m+++ b/.github/workflows/ci.yml[m
+[36m@@ -38,5 +38,8 @@[m [mjobs:[m
+       - name: Format[m
+         run: npm run format:check[m
+ [m
+[32m+[m[32m      - name: Build[m
+[32m+[m[32m        run: npm run build[m
+[32m+[m
+       - name: Tests[m
+         run: npm test[m
+[1mdiff --git a/analyze.js b/analyze.js[m
+[1mindex e61402b..09bc2b5 100644[m
+[1m--- a/analyze.js[m
+[1m+++ b/analyze.js[m
+[36m@@ -1,649 +1,2 @@[m
+ 'use strict';[m
+[31m-[m
+[31m-// Paper trade replay analyzer: reads session logs, reconstructs trades, and replays[m
+[31m-// them through a 7-parameter grid (9,216 combos) to find optimal exit settings.[m
+[31m-[m
+[31m-const fs = require('node:fs');[m
+[31m-const path = require('node:path');[m
+[31m-[m
+[31m-// ---------------------------------------------------------------------------[m
+[31m-// 1. Data ingestion[m
+[31m-// ---------------------------------------------------------------------------[m
+[31m-[m
+[31m-function findSessionDirs(baseDir) {[m
+[31m-  const logsDir = path.join(baseDir, 'logs', 'paper-trading');[m
+[31m-  if (!fs.existsSync(logsDir)) return [];[m
+[31m-  return fs[m
+[31m-    .readdirSync(logsDir)[m
+[31m-    .filter((d) => fs.statSync(path.join(logsDir, d)).isDirectory())[m
+[31m-    .sort()[m
+[31m-    .map((d) => path.join(logsDir, d));[m
+[31m-}[m
+[31m-[m
+[31m-function readJson(filePath) {[m
+[31m-  try {[m
+[31m-    return JSON.parse(fs.readFileSync(filePath, 'utf8'));[m
+[31m-  } catch {[m
+[31m-    return null;[m
+[31m-  }[m
+[31m-}[m
+[31m-[m
+[31m-function readJsonl(filePath) {[m
+[31m-  try {[m
+[31m-    const content = fs.readFileSync(filePath, 'utf8').trim();[m
+[31m-    if (!content) return [];[m
+[31m-    return content[m
+[31m-      .split('\n')[m
+[31m-      .map((line) => {[m
+[31m-        try {[m
+[31m-          return JSON.parse(line);[m
+[31m-        } catch {[m
+[31m-          return null;[m
+[31m-        }[m
+[31m-      })[m
+[31m-      .filter(Boolean);[m
+[31m-  } catch {[m
+[31m-    return [];[m
+[31m-  }[m
+[31m-}[m
+[31m-[m
+[31m-function ingestSessions(baseDir) {[m
+[31m-  const sessions = findSessionDirs(baseDir);[m
+[31m-  const allTrades = [];[m
+[31m-  const allMetrics = [];[m
+[31m-[m
+[31m-  for (const sessionDir of sessions) {[m
+[31m-    const journal = readJsonl(path.join(sessionDir, 'paper-trade-journal.jsonl'));[m
+[31m-    // Also check old .json extension for backward compatibility[m
+[31m-    const journalOld = readJsonl(path.join(sessionDir, 'paper-trade-journal.json'));[m
+[31m-    const tradeHistory = readJsonl(path.join(sessionDir, 'trade-journal.jsonl'));[m
+[31m-    const metrics = readJson(path.join(sessionDir, 'metrics.json'));[m
+[31m-[m
+[31m-    if (metrics) {[m
+[31m-      allMetrics.push({ sessionDir: path.basename(sessionDir), ...metrics });[m
+[31m-    }[m
+[31m-[m
+[31m-    // Group journal events by mint[m
+[31m-    const eventsByMint = new Map();[m
+[31m-    for (const ev of [...journal, ...journalOld]) {[m
+[31m-      if (!ev.mint) continue;[m
+[31m-      if (!eventsByMint.has(ev.mint)) eventsByMint.set(ev.mint, []);[m
+[31m-      eventsByMint.get(ev.mint).push(ev);[m
+[31m-    }[m
+[31m-[m
+[31m-    // Build trade history lookup by mint[m
+[31m-    const tradeByMint = new Map();[m
+[31m-    for (const t of tradeHistory) {[m
+[31m-      if (t.mint) tradeByMint.set(t.mint, t);[m
+[31m-    }[m
+[31m-[m
+[31m-    for (const [mint, events] of eventsByMint) {[m
+[31m-      const buyEvent = events.find((e) => e.event === 'buy');[m
+[31m-      const closeEvent = events.find((e) => e.event === 'close');[m
+[31m-      if (!buyEvent) continue;[m
+[31m-[m
+[31m-      const tradeMeta = tradeByMint.get(mint) || {};[m
+[31m-[m
+[31m-      const trade = {[m
+[31m-        sessionDir: path.basename(sessionDir),[m
+[31m-        mint: mint,[m
+[31m-        symbol: buyEvent.symbol || tradeMeta.symbol || 'UNKNOWN',[m
+[31m-        entryPriceUsd: Number(buyEvent.priceUsd || tradeMeta.entryPriceUsd || 0),[m
+[31m-        entryUsdValue: Number(tradeMeta.entryUsdValue || 0),[m
+[31m-        entryScore: Number(tradeMeta.entryScore || 0),[m
+[31m-        tpProfile: tradeMeta.tpProfile || null,[m
+[31m-        takeProfitMultiples: tradeMeta.takeProfitMultiples || null,[m
+[31m-        takeProfitFractions: tradeMeta.takeProfitFractions || null,[m
+[31m-        trailingStopDrawdownPctResolved: Number(tradeMeta.trailingStopDrawdownPctResolved || 0.2),[m
+[31m-        maxHoldMinutesResolved: Number(tradeMeta.maxHoldMinutesResolved || 20),[m
+[31m-        volatilityScaler: Number(tradeMeta.volatilityScaler || 0),[m
+[31m-        entryLiquidityUsd: Number(tradeMeta.entryLiquidityUsd || 0),[m
+[31m-        launchpad: tradeMeta.launchpad || null,[m
+[31m-        targetsHit: Number(tradeMeta.targetsHit || 0),[m
+[31m-        initialBuyAmountSol: tradeMeta.initialBuyAmountSol || null,[m
+[31m-        highestPriceUsd: Number(tradeMeta.highestPriceUsd || buyEvent.priceUsd || 0),[m
+[31m-        openedAt: buyEvent.timestamp || tradeMeta.openedAt || null,[m
+[31m-        closedAt: closeEvent?.timestamp || tradeMeta.closedAt || null,[m
+[31m-        events: events.map((e) => ({[m
+[31m-          event: e.event,[m
+[31m-          priceUsd: Number(e.priceUsd || 0),[m
+[31m-          tokenAmount: e.tokenAmount,[m
+[31m-          proceedsUsd: Number(e.proceedsUsd || 0),[m
+[31m-          realizedPnlUsd: Number(e.realizedPnlUsd || 0),[m
+[31m-          reason: e.reason || null,[m
+[31m-          timestamp: e.timestamp,[m
+[31m-        })),[m
+[31m-        totalRealizedPnlUsd: Number(tradeMeta.realizedPnlUsd || closeEvent?.realizedPnlUsd || 0),[m
+[31m-        totalProceedsUsd: Number(tradeMeta.realizedProceedsUsd || closeEvent?.proceedsUsd || 0),[m
+[31m-        actualExitReason: closeEvent?.reason || tradeMeta.exitReason || null,[m
+[31m-        actualExitPrice: Number(closeEvent?.priceUsd || 0),[m
+[31m-        holdSeconds: tradeMeta.holdSeconds[m
+[31m-          ? Number(tradeMeta.holdSeconds)[m
+[31m-          : closeEvent?.timestamp && buyEvent.timestamp[m
+[31m-            ? Math.max([m
+[31m-                0,[m
+[31m-                (new Date(closeEvent.timestamp).getTime() -[m
+[31m-                  new Date(buyEvent.timestamp).getTime()) /[m
+[31m-                  1000[m
+[31m-              )[m
+[31m-            : 0,[m
+[31m-      };[m
+[31m-[m
+[31m-      // Ensure highestPriceUsd is at least the max of all event prices[m
+[31m-      for (const ev of trade.events) {[m
+[31m-        if (ev.priceUsd > trade.highestPriceUsd) trade.highestPriceUsd = ev.priceUsd;[m
+[31m-      }[m
+[31m-[m
+[31m-      allTrades.push(trade);[m
+[31m-    }[m
+[31m-  }[m
+[31m-[m
+[31m-  return { trades: allTrades, metrics: allMetrics };[m
+[31m-}[m
+[31m-[m
+[31m-// ---------------------------------------------------------------------------[m
+[31m-// 2. Price path inference[m
+[31m-// ---------------------------------------------------------------------------[m
+[31m-[m
+[31m-function inferPricePath(trade, numPoints = 20) {[m
+[31m-  // Build a synthetic price path: entry → highest → exit[m
+[31m-  // This is approximate but sufficient for directional comparison[m
+[31m-  const entryP = trade.entryPriceUsd;[m
+[31m-  const highestP = Math.max(trade.highestPriceUsd, entryP);[m
+[31m-  const exitP = trade.actualExitPrice || entryP;[m
+[31m-  const holdSec = Math.max(1, trade.holdSeconds || 1);[m
+[31m-[m
+[31m-  // Determine when the peak occurred (assume midpoint if unknown)[m
+[31m-  const peakRatio = 0.4; // peak at 40% of hold time[m
+[31m-  const peakTime = holdSec * peakRatio;[m
+[31m-[m
+[31m-  const points = [];[m
+[31m-  const steps = numPoints;[m
+[31m-[m
+[31m-  for (let i = 0; i <= steps; i++) {[m
+[31m-    const t = (i / steps) * holdSec;[m
+[31m-    let price;[m
+[31m-    if (t <= peakTime) {[m
+[31m-      // Ramp up: entry → highest[m
+[31m-      const frac = peakTime > 0 ? t / peakTime : 0;[m
+[31m-      price = entryP + (highestP - entryP) * frac;[m
+[31m-    } else {[m
+[31m-      // Ramp down: highest → exit[m
+[31m-      const frac = holdSec > peakTime ? (t - peakTime) / (holdSec - peakTime) : 0;[m
+[31m-      price = highestP + (exitP - highestP) * frac;[m
+[31m-    }[m
+[31m-    points.push({ time: t, price: Math.max(price, 0.000001) });[m
+[31m-  }[m
+[31m-[m
+[31m-  return points;[m
+[31m-}[m
+[31m-[m
+[31m-// ---------------------------------------------------------------------------[m
+[31m-// 3. Replay engine[m
+[31m-// ---------------------------------------------------------------------------[m
+[31m-[m
+[31m-function replayTrade(trade, params) {[m
+[31m-  const pricePath = inferPricePath(trade);[m
+[31m-  if (pricePath.length < 2) return null;[m
+[31m-[m
+[31m-  const entryP = trade.entryPriceUsd;[m
+[31m-  const entryValue = trade.entryUsdValue;[m
+[31m-  const holdSec = trade.holdSeconds || 1;[m
+[31m-[m
+[31m-  let remainingTokens = 1.0; // fraction of initial tokens[m
+[31m-  let totalProceeds = 0;[m
+[31m-  const originalCost = entryValue;[m
+[31m-  let trailingArmed = false;[m
+[31m-  let highestSeen = entryP;[m
+[31m-  let targetsHit = 0;[m
+[31m-  let exitReason = 'none';[m
+[31m-  let exitTime = holdSec;[m
+[31m-[m
+[31m-  const tpMultiples = params.takeProfitMultiples;[m
+[31m-  const tpFraction = params.takeProfitFraction;[m
+[31m-  const slPct = params.stopLossPct;[m
+[31m-  const trailingPct = params.trailingDrawdownPct;[m
+[31m-  const earlyGuardSec = 15; // matches default earlyPerformanceGuardSeconds[m
+[31m-  const earlyDropPct = params.earlyPerformanceDropPct / 100;[m
+[31m-  const earlySellPct = params.earlyPerformanceSellPct / 100;[m
+[31m-  const maxHoldMin = params.maxHoldMinutes;[m
+[31m-  const timeExitMinMultiple = 1.25;[m
+[31m-[m
+[31m-  const activationMultiple = 1 + 0.5 * (tpMultiples[0] - 1); // midpoint of first target[m
+[31m-  const activationPrice = entryP * Math.min(activationMultiple, 1.12);[m
+[31m-[m
+[31m-  for (let i = 0; i < pricePath.length; i++) {[m
+[31m-    const p = pricePath[i].price;[m
+[31m-    const t = pricePath[i].time;[m
+[31m-    if (remainingTokens <= 0.001) break;[m
+[31m-[m
+[31m-    highestSeen = Math.max(highestSeen, p);[m
+[31m-[m
+[31m-    // 1. Early performance guard[m
+[31m-    if (t <= earlyGuardSec && targetsHit === 0) {[m
+[31m-      const drop = (entryP - p) / entryP;[m
+[31m-      if (drop > earlyDropPct) {[m
+[31m-        const soldFraction = Math.min(earlySellPct, remainingTokens);[m
+[31m-        totalProceeds += originalCost * soldFraction * (p / entryP);[m
+[31m-        remainingTokens -= soldFraction;[m
+[31m-        exitReason = 'early-performance-guard';[m
+[31m-        exitTime = t;[m
+[31m-        if (remainingTokens <= 0.001) break;[m
+[31m-      }[m
+[31m-    }[m
+[31m-[m
+[31m-    // 2. Stop loss[m
+[31m-    const slPrice = entryP * (1 - slPct);[m
+[31m-    if (p <= slPrice) {[m
+[31m-      totalProceeds += originalCost * remainingTokens * (p / entryP);[m
+[31m-      remainingTokens = 0;[m
+[31m-      exitReason = 'stop-loss';[m
+[31m-      exitTime = t;[m
+[31m-      break;[m
+[31m-    }[m
+[31m-[m
+[31m-    // 3. Take profit[m
+[31m-    while (targetsHit < tpMultiples.length) {[m
+[31m-      const targetP = entryP * tpMultiples[targetsHit];[m
+[31m-      if (p >= targetP && remainingTokens > 0.001) {[m
+[31m-        const sellFraction = Math.min(tpFraction, remainingTokens);[m
+[31m-        totalProceeds += originalCost * sellFraction * (p / entryP);[m
+[31m-        remainingTokens -= sellFraction;[m
+[31m-        targetsHit++;[m
+[31m-        exitReason = `take-profit-${tpMultiples[targetsHit - 1]}x`;[m
+[31m-        exitTime = t;[m
+[31m-      } else {[m
+[31m-        break;[m
+[31m-      }[m
+[31m-    }[m
+[31m-[m
+[31m-    // 4. Trailing stop arming[m
+[31m-    if (!trailingArmed && p >= activationPrice) {[m
+[31m-      trailingArmed = true;[m
+[31m-    }[m
+[31m-[m
+[31m-    // Trailing stop trigger[m
+[31m-    if (trailingArmed && remainingTokens > 0.001) {[m
+[31m-      const trailP = highestSeen * (1 - trailingPct);[m
+[31m-      if (p < trailP) {[m
+[31m-        totalProceeds += originalCost * remainingTokens * (p / entryP);[m
+[31m-        remainingTokens = 0;[m
+[31m-        exitReason = 'tp-trailing-max-exit';[m
+[31m-        exitTime = t;[m
+[31m-        break;[m
+[31m-      }[m
+[31m-    }[m
+[31m-[m
+[31m-    // 5. Time exit[m
+[31m-    const ageMin = t / 60;[m
+[31m-    if (ageMin >= maxHoldMin && p < entryP * timeExitMinMultiple && remainingTokens > 0.001) {[m
+[31m-      totalProceeds += originalCost * remainingTokens * (p / entryP);[m
+[31m-      remainingTokens = 0;[m
+[31m-      exitReason = 'time-exit';[m
+[31m-      exitTime = t;[m
+[31m-      break;[m
+[31m-    }[m
+[31m-  }[m
+[31m-[m
+[31m-  // Remaining tokens valued at exit price[m
+[31m-  if (remainingTokens > 0.001) {[m
+[31m-    const exitP = pricePath[pricePath.length - 1].price;[m
+[31m-    totalProceeds += originalCost * remainingTokens * (exitP / entryP);[m
+[31m-    remainingTokens = 0;[m
+[31m-    if (exitReason === 'none') exitReason = 'end-of-simulation';[m
+[31m-  }[m
+[31m-[m
+[31m-  const pnl = totalProceeds - originalCost;[m
+[31m-  const roi = entryValue > 0 ? (pnl / entryValue) * 100 : 0;[m
+[31m-[m
+[31m-  return {[m
+[31m-    pnl: Math.round(pnl * 100) / 100,[m
+[31m-    roi: Math.round(roi * 100) / 100,[m
+[31m-    exitReason,[m
+[31m-    exitTime: Math.round(exitTime),[m
+[31m-    targetsHit,[m
+[31m-    totalProceeds: Math.round(totalProceeds * 100) / 100,[m
+[31m-  };[m
+[31m-}[m
+[31m-[m
+[31m-// ---------------------------------------------------------------------------[m
+[31m-// 4. Parameter grid[m
+[31m-// ---------------------------------------------------------------------------[m
+[31m-[m
+[31m-const PARAM_GRID = {[m
+[31m-  stopLossPct: [0.1, 0.15, 0.2, 0.25],[m
+[31m-  trailingDrawdownPct: [0.1, 0.15, 0.2, 0.25],[m
+[31m-  takeProfitMultiples: [[1.5], [1.3, 2.0], [1.5, 2.5]],[m
+[31m-  takeProfitFraction: [0.5, 0.6, 0.75],[m
+[31m-  earlyPerformanceDropPct: [5, 10, 15, 20],[m
+[31m-  earlyPerformanceSellPct: [40, 60, 80, 100],[m
+[31m-  maxHoldMinutes: [10, 20, 30, 60],[m
+[31m-};[m
+[31m-[m
+[31m-function generateGrid() {[m
+[31m-  const keys = Object.keys(PARAM_GRID);[m
+[31m-  const values = keys.map((k) => PARAM_GRID[k]);[m
+[31m-[m
+[31m-  function* cartesian(arrs, idx = 0, current = []) {[m
+[31m-    if (idx === arrs.length) {[m
+[31m-      const params = {};[m
+[31m-      for (let i = 0; i < keys.length; i++) {[m
+[31m-        params[keys[i]] = current[i];[m
+[31m-      }[m
+[31m-      yield params;[m
+[31m-      return;[m
+[31m-    }[m
+[31m-    for (const v of arrs[idx]) {[m
+[31m-      yield* cartesian(arrs, idx + 1, [...current, v]);[m
+[31m-    }[m
+[31m-  }[m
+[31m-[m
+[31m-  return [...cartesian(values)];[m
+[31m-}[m
+[31m-[m
+[31m-function stringifyParams(p) {[m
+[31m-  const parts = [];[m
+[31m-  parts.push(`SL=${(p.stopLossPct * 100).toFixed(0)}%`);[m
+[31m-  parts.push(`Trail=${(p.trailingDrawdownPct * 100).toFixed(0)}%`);[m
+[31m-  parts.push(`TP=[${p.takeProfitMultiples.join(',')}]`);[m
+[31m-  parts.push(`TPFrac=${p.takeProfitFraction}`);[m
+[31m-  parts.push(`EarlyDrop=${p.earlyPerformanceDropPct}%`);[m
+[31m-  parts.push(`EarlySell=${p.earlyPerformanceSellPct}%`);[m
+[31m-  parts.push(`Hold=${p.maxHoldMinutes}m`);[m
+[31m-  return parts.join(' ');[m
+[31m-}[m
+[31m-[m
+[31m-// ---------------------------------------------------------------------------[m
+[31m-// 5. Analysis[m
+[31m-// ---------------------------------------------------------------------------[m
+[31m-[m
+[31m-function runAnalysis(trades, metrics) {[m
+[31m-  const grid = generateGrid();[m
+[31m-  const totalCombos = grid.length;[m
+[31m-[m
+[31m-  console.log(`\n=== Veloci-Buy Trade Replay Analyzer ===`);[m
+[31m-  console.log(`Sessions: ${new Set(trades.map((t) => t.sessionDir)).size}`);[m
+[31m-  console.log(`Trades: ${trades.length}`);[m
+[31m-  console.log(`Parameter combos: ${totalCombos.toLocaleString()}`);[m
+[31m-  console.log(`\nScanning...`);[m
+[31m-[m
+[31m-  const results = [];[m
+[31m-  let processed = 0;[m
+[31m-[m
+[31m-  for (const params of grid) {[m
+[31m-    let totalPnl = 0;[m
+[31m-    let wins = 0;[m
+[31m-    let losses = 0;[m
+[31m-    let maxLoss = 0;[m
+[31m-    const pnlValues = [];[m
+[31m-[m
+[31m-    for (const trade of trades) {[m
+[31m-      const r = replayTrade(trade, params);[m
+[31m-      if (!r) continue;[m
+[31m-      totalPnl += r.pnl;[m
+[31m-      pnlValues.push(r.pnl);[m
+[31m-      if (r.pnl > 0) wins++;[m
+[31m-      else losses++;[m
+[31m-      if (r.pnl < maxLoss) maxLoss = r.pnl;[m
+[31m-    }[m
+[31m-[m
+[31m-    const totalTrades = wins + losses;[m
+[31m-    const winRate = totalTrades > 0 ? wins / totalTrades : 0;[m
+[31m-    const avgPnl = totalTrades > 0 ? totalPnl / totalTrades : 0;[m
+[31m-    const grossWins = pnlValues.filter((v) => v > 0).reduce((a, b) => a + b, 0);[m
+[31m-    const grossLosses = Math.abs(pnlValues.filter((v) => v < 0).reduce((a, b) => a + b, 0));[m
+[31m-    const profitFactor = grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? Infinity : 0;[m
+[31m-[m
+[31m-    results.push({[m
+[31m-      params,[m
+[31m-      totalPnl: Math.round(totalPnl * 100) / 100,[m
+[31m-      winRate: Math.round(winRate * 1000) / 10,[m
+[31m-      avgPnl: Math.round(avgPnl * 100) / 100,[m
+[31m-      maxLoss: Math.round(maxLoss * 100) / 100,[m
+[31m-      profitFactor: profitFactor === Infinity ? 'Inf' : Math.round(profitFactor * 100) / 100,[m
+[31m-      trades: totalTrades,[m
+[31m-    });[m
+[31m-[m
+[31m-    processed++;[m
+[31m-    if (processed % 1000 === 0) {[m
+[31m-      process.stdout.write([m
+[31m-        `\r  ${processed.toLocaleString()} / ${totalCombos.toLocaleString()} combos`[m
+[31m-      );[m
+[31m-    }[m
+[31m-  }[m
+[31m-[m
+[31m-  process.stdout.write([m
+[31m-    `\r  ${totalCombos.toLocaleString()} / ${totalCombos.toLocaleString()} combos   \n`[m
+[31m-  );[m
+[31m-[m
+[31m-  // Sort by total PnL descending[m
+[31m-  results.sort((a, b) => b.totalPnl - a.totalPnl);[m
+[31m-[m
+[31m-  return { results, trades, metrics };[m
+[31m-}[m
+[31m-[m
+[31m-// ---------------------------------------------------------------------------[m
+[31m-// 6. Output[m
+[31m-// ---------------------------------------------------------------------------[m
+[31m-[m
+[31m-function pad(str, len) {[m
+[31m-  const s = String(str);[m
+[31m-  return s.length >= len ? s : s + ' '.repeat(len - s.length);[m
+[31m-}[m
+[31m-[m
+[31m-function printTradeSummary(trades) {[m
+[31m-  console.log(`\n--- Trade Summary (${trades.length} trades) ---`);[m
+[31m-  console.log([m
+[31m-    pad('Symbol', 10) +[m
+[31m-      pad('Score', 7) +[m
+[31m-      pad('Entry$', 14) +[m
+[31m-      pad('Highest$', 14) +[m
+[31m-      pad('Exit$', 14) +[m
+[31m-      pad('PnL$', 12) +[m
+[31m-      pad('Hold', 8) +[m
+[31m-      'Exit Reason'[m
+[31m-  );[m
+[31m-  console.log('-'.repeat(95));[m
+[31m-[m
+[31m-  for (const t of trades) {[m
+[31m-    console.log([m
+[31m-      pad(t.symbol, 10) +[m
+[31m-        pad(t.entryScore, 7) +[m
+[31m-        pad('$' + t.entryPriceUsd.toFixed(8), 14) +[m
+[31m-        pad('$' + t.highestPriceUsd.toFixed(8), 14) +[m
+[31m-        pad('$' + t.actualExitPrice.toFixed(8), 14) +[m
+[31m-        pad('$' + t.totalRealizedPnlUsd.toFixed(2), 12) +[m
+[31m-        pad(Math.round(t.holdSeconds) + 's', 8) +[m
+[31m-        (t.actualExitReason || 'unknown')[m
+[31m-    );[m
+[31m-  }[m
+[31m-}[m
+[31m-[m
+[31m-function printTopCombos(results, topN = 15) {[m
+[31m-  console.log(`\n--- Top ${topN} Parameter Combos (by Total PnL) ---`);[m
+[31m-  console.log([m
+[31m-    pad('Rank', 5) +[m
+[31m-      pad('Total PnL$', 14) +[m
+[31m-      pad('Win%', 7) +[m
+[31m-      pad('Avg PnL$', 12) +[m
+[31m-      pad('Max Loss$', 12) +[m
+[31m-      pad('PF', 6) +[m
+[31m-      'Parameters'[m
+[31m-  );[m
+[31m-  console.log('-'.repeat(130));[m
+[31m-[m
+[31m-  for (let i = 0; i < Math.min(topN, results.length); i++) {[m
+[31m-    const r = results[i];[m
+[31m-    console.log([m
+[31m-      pad(i + 1, 5) +[m
+[31m-        pad('$' + r.totalPnl.toFixed(2), 14) +[m
+[31m-        pad(r.winRate.toFixed(1) + '%', 7) +[m
+[31m-        pad('$' + r.avgPnl.toFixed(2), 12) +[m
+[31m-        pad('$' + r.maxLoss.toFixed(2), 12) +[m
+[31m-        pad(String(r.profitFactor), 6) +[m
+[31m-        stringifyParams(r.params)[m
+[31m-    );[m
+[31m-  }[m
+[31m-}[m
+[31m-[m
+[31m-function printSensitivity(results, _trades) {[m
+[31m-  console.log(`\n--- Per-Parameter Sensitivity ---`);[m
+[31m-[m
+[31m-  const paramKeys = Object.keys(PARAM_GRID);[m
+[31m-[m
+[31m-  for (const key of paramKeys) {[m
+[31m-    const grouped = new Map();[m
+[31m-[m
+[31m-    for (const r of results) {[m
+[31m-      const valKey = Array.isArray(r.params[key])[m
+[31m-        ? '[' + r.params[key].join(',') + ']'[m
+[31m-        : String(r.params[key]);[m
+[31m-      if (!grouped.has(valKey)) grouped.set(valKey, { pnl: 0, count: 0 });[m
+[31m-      const g = grouped.get(valKey);[m
+[31m-      g.pnl += r.totalPnl;[m
+[31m-      g.count++;[m
+[31m-    }[m
+[31m-[m
+[31m-    const sorted = [...grouped.entries()].sort((a, b) => b[1].pnl - a[1].pnl);[m
+[31m-    const label = key.replace(/([A-Z])/g, ' $1').replace(/^./, (s) => s.toUpperCase());[m
+[31m-[m
+[31m-    console.log(`\n  ${label}:`);[m
+[31m-    for (const [val, agg] of sorted) {[m
+[31m-      const avg = agg.count > 0 ? agg.pnl / agg.count : 0;[m
+[31m-      console.log(`    ${pad(val, 20)}  Avg PnL: $${avg.toFixed(2)}  (${agg.count} combos)`);[m
+[31m-    }[m
+[31m-  }[m
+[31m-}[m
+[31m-[m
+[31m-function printFunnel(metrics) {[m
+[31m-  if (metrics.length === 0) return;[m
+[31m-[m
+[31m-  console.log(`\n--- Rejection Funnel (across ${metrics.length} sessions) ---`);[m
+[31m-[m
+[31m-  // Aggregate rejection reasons[m
+[31m-  const totalRejections = new Map();[m
+[31m-  for (const m of metrics) {[m
+[31m-    if (m.rejectionReasons) {[m
+[31m-      for (const [reason, count] of Object.entries(m.rejectionReasons)) {[m
+[31m-        totalRejections.set(reason, (totalRejections.get(reason) || 0) + count);[m
+[31m-      }[m
+[31m-    }[m
+[31m-  }[m
+[31m-[m
+[31m-  const sorted = [...totalRejections.entries()].sort((a, b) => b[1] - a[1]);[m
+[31m-  const maxCount = sorted.length > 0 ? sorted[0][1] : 1;[m
+[31m-  const barWidth = 40;[m
+[31m-[m
+[31m-  console.log(pad('Reason', 35) + pad('Count', 10) + pad('%', 8) + 'Bar');[m
+[31m-  console.log('-'.repeat(95));[m
+[31m-[m
+[31m-  for (const [reason, count] of sorted) {[m
+[31m-    const pct = ((count / maxCount) * 100).toFixed(1);[m
+[31m-    const barLen = Math.round((count / maxCount) * barWidth);[m
+[31m-    const bar = '#'.repeat(barLen);[m
+[31m-    console.log(pad(reason, 35) + pad(count.toLocaleString(), 10) + pad(pct + '%', 8) + bar);[m
+[31m-  }[m
+[31m-[m
+[31m-  // Show funnel pass-through rates[m
+[31m-  const totals = { discovered: 0, cheapAudit: 0, survival: 0, bought: 0, auditPassed: 0 };[m
+[31m-  for (const m of metrics) {[m
+[31m-    totals.discovered += m.discoveredCandidates || 0;[m
+[31m-    totals.cheapAudit += m.passedCheapAudit || 0;[m
+[31m-    totals.survival += m.passedSurvival || 0;[m
+[31m-    totals.bought += m.boughtPositions || 0;[m
+[31m-    totals.auditPassed += m.passedAudit || 0;[m
+[31m-  }[m
+[31m-[m
+[31m-  console.log(`\n  Funnel pass-through:`);[m
+[31m-  console.log(`    Discovered:        ${totals.discovered.toLocaleString()}`);[m
+[31m-  console.log([m
+[31m-    `    Passed cheap audit: ${totals.cheapAudit.toLocaleString()} (${totals.discovered > 0 ? ((totals.cheapAudit / totals.discovered) * 100).toFixed(1) : 0}%)`[m
+[31m-  );[m
+[31m-  console.log([m
+[31m-    `    Passed survival:    ${totals.survival.toLocaleString()} (${totals.cheapAudit > 0 ? ((totals.survival / totals.cheapAudit) * 100).toFixed(1) : 0}%)`[m
+[31m-  );[m
+[31m-  console.log([m
+[31m-    `    Bought positions:   ${totals.bought.toLocaleString()} (${totals.survival > 0 ? ((totals.bought / totals.survival) * 100).toFixed(1) : 0}%)`[m
+[31m-  );[m
+[31m-}[m
+[31m-[m
+[31m-// ---------------------------------------------------------------------------[m
+[31m-// 7. Main[m
+[31m-// ---------------------------------------------------------------------------[m
+[31m-[m
+[31m-function main() {[m
+[31m-  const baseDir = process.cwd();[m
+[31m-  const { trades, metrics } = ingestSessions(baseDir);[m
+[31m-[m
+[31m-  if (trades.length === 0) {[m
+[31m-    console.log('No paper trades found. Run the bot in PAPER_TRADING mode first.');[m
+[31m-    process.exit(0);[m
+[31m-  }[m
+[31m-[m
+[31m-  const { results } = runAnalysis(trades, metrics);[m
+[31m-[m
+[31m-  printTradeSummary(trades);[m
+[31m-  printTopCombos(results);[m
+[31m-  printSensitivity(results, trades);[m
+[31m-  printFunnel(metrics);[m
+[31m-[m
+[31m-  // Write full results to file for further analysis[m
+[31m-  const outputFile = path.join(baseDir, 'analysis-results.json');[m
+[31m-  fs.writeFileSync([m
+[31m-    outputFile,[m
+[31m-    JSON.stringify([m
+[31m-      {[m
+[31m-        generatedAt: new Date().toISOString(),[m
+[31m-        tradeCount: trades.length,[m
+[31m-        comboCount: results.length,[m
+[31m-        topCombos: results.slice(0, 50).map((r) => ({[m
+[31m-          params: r.params,[m
+[31m-          totalPnl: r.totalPnl,[m
+[31m-          winRate: r.winRate,[m
+[31m-          avgPnl: r.avgPnl,[m
+[31m-          maxLoss: r.maxLoss,[m
+[31m-          profitFactor: r.profitFactor,[m
+[31m-        })),[m
+[31m-        sensitivity: computeSensitivitySummary(results),[m
+[31m-      },[m
+[31m-      null,[m
+[31m-      2[m
+[31m-    )[m
+[31m-  );[m
+[31m-  console.log(`\nFull results written to ${outputFile}`);[m
+[31m-}[m
+[31m-[m
+[31m-function computeSensitivitySummary(results) {[m
+[31m-  const summary = {};[m
+[31m-  for (const key of Object.keys(PARAM_GRID)) {[m
+[31m-    const grouped = new Map();[m
+[31m-    for (const r of results) {[m
+[31m-      const valKey = Array.isArray(r.params[key])[m
+[31m-        ? '[' + r.params[key].join(',') + ']'[m
+[31m-        : String(r.params[key]);[m
+[31m-      if (!grouped.has(valKey)) grouped.set(valKey, { pnl: 0, count: 0 });[m
+[31m-      const g = grouped.get(valKey);[m
+[31m-      g.pnl += r.totalPnl;[m
+[31m-      g.count++;[m
+[31m-    }[m
+[31m-    summary[key] = [...grouped.entries()][m
+[31m-      .map(([val, agg]) => ({[m
+[31m-        value: val,[m
+[31m-        avgPnl: agg.count > 0 ? Math.round((agg.pnl / agg.count) * 100) / 100 : 0,[m
+[31m-      }))[m
+[31m-      .sort((a, b) => b.avgPnl - a.avgPnl);[m
+[31m-  }[m
+[31m-  return summary;[m
+[31m-}[m
+[31m-[m
+[31m-if (require.main === module) {[m
+[31m-  main();[m
+[31m-}[m
+[31m-[m
+[31m-module.exports = {[m
+[31m-  ingestSessions,[m
+[31m-  inferPricePath,[m
+[31m-  replayTrade,[m
+[31m-  generateGrid,[m
+[31m-  PARAM_GRID,[m
+[31m-};[m
+[32m+[m[32mrequire('./dist/core/analyze.js');[m
+[1mdiff --git a/src/core/store.ts b/src/core/store.ts[m
+[1mindex 33797a2..24a119c 100644[m
+[1m--- a/src/core/store.ts[m
+[1m+++ b/src/core/store.ts[m
+[36m@@ -89,11 +89,11 @@[m [mexport class StateStore extends EventEmitter {[m
+           ? parsed.pendingCandidateRechecks[m
+           : [];[m
+         this.state.pendingCandidateRechecks = new Map([m
+[31m-          rechecks.filter((e: any) => e?.mint).map((e: any) => [e.mint, e])[m
+[32m+[m[32m          rechecks.filter((e: RecheckItem) => e?.mint).map((e: RecheckItem) => [e.mint, e])[m
+         );[m
+ [m
+         const positions = Array.isArray(parsed.positions) ? parsed.positions : [];[m
+[31m-        this.state.positions = new Map(positions.map((p: any) => [p.mint, p]));[m
+[32m+[m[32m        this.state.positions = new Map(positions.map((p: Position) => [p.mint, p]));[m
+ [m
+         this.state.launchHistory = Array.isArray(parsed.launchHistory) ? parsed.launchHistory : [];[m
+         this.state.paperSolBalanceLamports =[m
+[1mdiff --git a/src/services/engine/engine.service.ts b/src/services/engine/engine.service.ts[m
+[1mindex 709a702..41369e1 100644[m
+[1m--- a/src/services/engine/engine.service.ts[m
+[1m+++ b/src/services/engine/engine.service.ts[m
+[36m@@ -11,7 +11,7 @@[m [mimport {[m
+   MOMENTUM_FILTERS,[m
+ } from '../../core/config.js';[m
+ import * as audit from '../audit/audit.service.js';[m
+[31m-import { Context, TokenMetadata, LaunchpadProfile } from '../../types/index.js';[m
+[32m+[m[32mimport { Context, TokenMetadata, LaunchpadProfile, EvaluationResult, AdjustedThresholds } from '../../types/index.js';[m
+ [m
+ /**[m
+  * Retrieves the profile for a given launchpad.[m
+[36m@@ -46,18 +46,8 @@[m [mfunction getValidPriceHistory(priceHistory: any[]): any[] {[m
+   return priceHistory.map(normalizePricePoint).filter(Boolean);[m
+ }[m
+ [m
+[31m-export interface AdjustedThresholds {[m
+[31m-  minLiquidityUsd: number;[m
+[31m-  minHolderCount: number;[m
+[31m-  minBuys5m: number;[m
+[31m-  minPoolAgeSeconds: number;[m
+[31m-}[m
+[31m-[m
+ /**[m
+  * Calculates adjusted audit thresholds based on the launchpad profile.[m
+[31m- * @param ctx - The application context.[m
+[31m- * @param profile - The launchpad profile.[m
+[31m- * @returns The adjusted thresholds.[m
+  */[m
+ export function getLaunchpadAdjustedThresholds([m
+   ctx: Context,[m
+[36m@@ -173,21 +163,6 @@[m [mexport function isSlightlyBelowThreshold([m
+   return numericActual >= required * (1 - ctx.config.borderlineThresholdBufferRatio);[m
+ }[m
+ [m
+[31m-export interface EvaluationResult {[m
+[31m-  approved: boolean;[m
+[31m-  blockers: string[];[m
+[31m-  rejectionReasons: { code: string; recheckEligible: boolean }[];[m
+[31m-  notes: string[];[m
+[31m-  candidateScore: number;[m
+[31m-  volatilityScaler: number;[m
+[31m-  launchpadProfile: LaunchpadProfile & { name: string };[m
+[31m-  adjustedThresholds: AdjustedThresholds;[m
+[31m-  token: TokenMetadata;[m
+[31m-  mintSignals?: any;[m
+[31m-  goPlusTokenSignals?: any;[m
+[31m-  bubbleMapsSignals?: any;[m
+[31m-}[m
+[31m-[m
+ /**[m
+  * Performs a multi-stage evaluation of a token candidate.[m
+  */[m
+[1mdiff --git a/src/services/monitor/monitor.service.ts b/src/services/monitor/monitor.service.ts[m
+[1mindex efe74bc..b758be3 100644[m
+[1m--- a/src/services/monitor/monitor.service.ts[m
+[1m+++ b/src/services/monitor/monitor.service.ts[m
+[36m@@ -54,22 +54,7 @@[m [mexport function incrementExitReasonMetric(ctx: Context, reason: string): void {[m
+  */[m
+ export async function executePositionExit([m
+   ctx: Context,[m
+[31m-  pos: Position & {[m
+[31m-    targetsHit?: number;[m
+[31m-    lastTakeProfitAt?: string;[m
+[31m-    lastTakeProfitMultiple?: number | null;[m
+[31m-    lastKnownBalanceRaw?: string;[m
+[31m-    lastKnownPriceUsd?: number;[m
+[31m-    remainingCostUsd?: number;[m
+[31m-    realizedPnlUsd?: number;[m
+[31m-    realizedProceedsUsd?: number;[m
+[31m-    lastExitReason?: string;[m
+[31m-    lastSellSignature?: string;[m
+[31m-    stopLossWarningSent?: boolean;[m
+[31m-    minTpArmed?: boolean;[m
+[31m-    minTpReached?: boolean;[m
+[31m-    minTpFirstReachedAt?: number | null;[m
+[31m-  },[m
+[32m+[m[32m  pos: Position,[m
+   balance: WalletBalance,[m
+   pUsd: number,[m
+   sellRaw: bigint,[m
+[36m@@ -185,7 +170,7 @@[m [mexport async function sellTakeProfit([m
+   pUsd: number,[m
+   targetM: number[m
+ ): Promise<boolean> {[m
+[31m-  const frac = getTakeProfitFraction(pos, (pos as any).targetsHit || 0);[m
+[32m+[m[32m  const frac = getTakeProfitFraction(pos, pos.targetsHit || 0);[m
+   const amt = computeTakeProfitSellAmount(balance.rawAmount, frac);[m
+   return executePositionExit(ctx, pos, balance, pUsd, amt, `take-profit-${targetM}x`, targetM);[m
+ }[m
+[36m@@ -331,24 +316,24 @@[m [mexport function recordClosedTrade(ctx: Context, pos: Position, reason: string):[m
+     mint: pos.mint,[m
+     symbol: pos.symbol,[m
+     exitReason: reason,[m
+[31m-    realizedPnlUsd: Number((pos as any).realizedPnlUsd || 0),[m
+[31m-    realizedProceedsUsd: Number((pos as any).realizedProceedsUsd || 0),[m
+[32m+[m[32m    realizedPnlUsd: Number(pos.realizedPnlUsd || 0),[m
+[32m+[m[32m    realizedProceedsUsd: Number(pos.realizedProceedsUsd || 0),[m
+     entryUsdValue: Number(pos.entryUsdValue || 0),[m
+     entryPriceUsd: Number(pos.entryPriceUsd || 0),[m
+     highestPriceUsd: Number(pos.highestPriceUsd || pos.entryPriceUsd || 0),[m
+     holdSeconds: Math.max(0, (Date.now() - openedAtMs) / 1000),[m
+     closedAt: new Date().toISOString(),[m
+     entryScore: Number(pos.entryScore || 0),[m
+[31m-    tpProfile: (pos as any).tpProfile || null,[m
+[32m+[m[32m    tpProfile: pos.tpProfile || null,[m
+     takeProfitMultiples: pos.takeProfitMultiples || null,[m
+     takeProfitFractions: pos.takeProfitFractions || null,[m
+     trailingStopDrawdownPctResolved: Number(pos.trailingStopDrawdownPctResolved || 0),[m
+     maxHoldMinutesResolved: Number(pos.maxHoldMinutesResolved || 0),[m
+     volatilityScaler: Number(pos.volatilityScaler || 0),[m
+     entryLiquidityUsd: Number(pos.entryLiquidityUsd || 0),[m
+[31m-    launchpad: (pos as any).launchpad || null,[m
+[31m-    targetsHit: Number((pos as any).targetsHit || 0),[m
+[31m-    initialBuyAmountSol: (pos as any).initialBuyAmountSol || null,[m
+[32m+[m[32m    launchpad: pos.launchpad || null,[m
+[32m+[m[32m    targetsHit: Number(pos.targetsHit || 0),[m
+[32m+[m[32m    initialBuyAmountSol: pos.initialBuyAmountSol || null,[m
+   };[m
+   ctx.store.addClosedTrade(trade);[m
+   journalClosedTrade(ctx, trade);[m
+[36m@@ -369,7 +354,15 @@[m [mexport function startCoolDown(ctx: Context, mint: string, pUsd: number): void {[m
+   ctx.store.startCoolDown(mint, pUsd, expires);[m
+ }[m
+ [m
+[31m-export async function monitorPositions(ctx: Context, fetchPricesBestEffort: any): Promise<void> {[m
+[32m+[m[32mexport async function monitorPositions([m
+[32m+[m[32m  ctx: Context,[m
+[32m+[m[32m  fetchPricesBestEffort: ([m
+[32m+[m[32m    ctx: Context,[m
+[32m+[m[32m    mints: string[],[m
+[32m+[m[32m    label: string,[m
+[32m+[m[32m    apiKey?: string[m
+[32m+[m[32m  ) => Promise<Record<string, any>>[m
+[32m+[m[32m): Promise<void> {[m
+   if (ctx.state.positions.size === 0) return;[m
+   const mints = Array.from(ctx.state.positions.keys());[m
+   const prices = await fetchPricesBestEffort([m
+[36m@@ -382,7 +375,7 @@[m [mexport async function monitorPositions(ctx: Context, fetchPricesBestEffort: any)[m
+   await runBoundedPool([m
+     mints,[m
+     async (mint) => {[m
+[31m-      const pos: any = ctx.state.positions.get(mint);[m
+[32m+[m[32m      const pos = ctx.state.positions.get(mint);[m
+       if (!pos) return;[m
+       const multiples =[m
+         Array.isArray(pos.takeProfitMultiples) && pos.takeProfitMultiples.length > 0[m
+[1mdiff --git a/src/services/services.ts b/src/services/services.ts[m
+[1mindex b316599..19cd30e 100644[m
+[1m--- a/src/services/services.ts[m
+[1m+++ b/src/services/services.ts[m
+[36m@@ -18,10 +18,10 @@[m [mimport { address, getProgramDerivedAddress, getAddressEncoder } from '@solana/ad[m
+ import * as engine from './engine/engine.service.js';[m
+ import * as trading from './trading/trading.service.js';[m
+ import * as monitor from './monitor/monitor.service.js';[m
+[31m-import { Context } from '../types/index.js';[m
+[32m+[m[32mimport { Context, Config, TokenMetadata, Position, SwapOrder, EvaluationResult } from '../types/index.js';[m
+ import path from 'node:path';[m
+ [m
+[31m-function resolveBuyAmountLamports(config: any): string {[m
+[32m+[m[32mfunction resolveBuyAmountLamports(config: Config): string {[m
+   if (config.buyAmountLamports !== undefined && config.buyAmountLamports !== null) {[m
+     return String(config.buyAmountLamports);[m
+   }[m
+[36m@@ -34,7 +34,7 @@[m [mfunction resolveBuyAmountLamports(config: any): string {[m
+ /**[m
+  * Fetches recent token launches from Jupiter.[m
+  */[m
+[31m-export async function fetchRecentLaunches(ctx: Context): Promise<any[]> {[m
+[32m+[m[32mexport async function fetchRecentLaunches(ctx: Context): Promise<TokenMetadata[]> {[m
+   const url = `${ctx.config.jupiterBaseUrl}/tokens/v2/recent`;[m
+   const data = await fetchJson(url, {[m
+     headers: { 'x-api-key': ctx.config.jupiterApiKey },[m
+[36m@@ -238,9 +238,9 @@[m [mexport const looksLikeMemecoin = engineLooksLikeMemecoin;[m
+  */[m
+ export async function buyCandidate([m
+   ctx: Context,[m
+[31m-  evaluation: any,[m
+[31m-  prefetchedQuotePromise: Promise<any> | null = null[m
+[31m-): Promise<any | null> {[m
+[32m+[m[32m  evaluation: EvaluationResult,[m
+[32m+[m[32m  prefetchedQuotePromise: Promise<SwapOrder | null> | null = null[m
+[32m+[m[32m): Promise<Position | null> {[m
+   ctx.store.incrementMetric('buyAttempts');[m
+   const { token, candidateScore } = evaluation;[m
+   const decimals = Number([m
+[1mdiff --git a/src/services/trading/trading.service.ts b/src/services/trading/trading.service.ts[m
+[1mindex 7871969..cbab785 100644[m
+[1m--- a/src/services/trading/trading.service.ts[m
+[1m+++ b/src/services/trading/trading.service.ts[m
+[36m@@ -14,7 +14,7 @@[m [mimport {[m
+   PRIORITY,[m
+ } from '../../core/utils.js';[m
+ import { SOL_MINT } from '../../core/config.js';[m
+[31m-import { Context } from '../../types/index.js';[m
+[32m+[m[32mimport { Context, SwapOrder, TokenMetadata } from '../../types/index.js';[m
+ [m
+ const SOL_PRICE_CACHE_TTL_MS = 10_000;[m
+ let _solPriceCache = { price: 0, fetchedAt: 0 };[m
+[36m@@ -137,7 +137,7 @@[m [mexport async function fetchSdkSwapOrder([m
+   outputMint: string,[m
+   amountLamports: bigint | string,[m
+   isPanic = false[m
+[31m-): Promise<any> {[m
+[32m+[m[32m): Promise<SwapOrder> {[m
+   const basePath =[m
+     ctx.config.jupiterBaseUrl.includes('api.jup.ag') && !ctx.config.jupiterBaseUrl.includes('v6')[m
+       ? 'https://quote-api.jup.ag/v6'[m
+[36m@@ -212,7 +212,7 @@[m [mexport async function fetchSwapOrder([m
+   outputMint: string,[m
+   amount: bigint | string,[m
+   isPanic = false[m
+[31m-): Promise<any> {[m
+[32m+[m[32m): Promise<SwapOrder> {[m
+   if (ctx.config.useJupiterSdk) {[m
+     ctx.logger(`Using Jupiter SDK path for ${outputMint}.`, 'debug');[m
+     return await fetchSdkSwapOrder(ctx, inputMint, outputMint, amount, isPanic);[m
+[36m@@ -246,7 +246,7 @@[m [mexport async function fetchSwapOrder([m
+ /**[m
+  * Executes a swap order. Dispatches to either Jupiter managed execution or direct RPC submission.[m
+  */[m
+[31m-export async function executeSwapOrder(ctx: Context, order: any): Promise<string> {[m
+[32m+[m[32mexport async function executeSwapOrder(ctx: Context, order: SwapOrder): Promise<string> {[m
+   if (order.requestId) {[m
+     return executeJupiterManagedOrder(ctx, order);[m
+   }[m
+[36m@@ -259,7 +259,7 @@[m [mfunction getSignedTransactionBase64(transaction: any): string {[m
+ [m
+ async function signSwapTransaction([m
+   ctx: Context,[m
+[31m-  order: any,[m
+[32m+[m[32m  order: SwapOrder,[m
+   allowPartialSignatures = false[m
+ ): Promise<string> {[m
+   const transactionBytes = Buffer.from(order.transaction, 'base64');[m
+[36m@@ -269,7 +269,7 @@[m [masync function signSwapTransaction([m
+   return getSignedTransactionBase64(signedTransaction);[m
+ }[m
+ [m
+[31m-async function executeJupiterManagedOrder(ctx: Context, order: any): Promise<string> {[m
+[32m+[m[32masync function executeJupiterManagedOrder(ctx: Context, order: SwapOrder): Promise<string> {[m
+   const signedTransaction = await signSwapTransaction(ctx, order, true);[m
+   const body: any = {[m
+     signedTransaction,[m
+[36m@@ -297,7 +297,7 @@[m [masync function executeJupiterManagedOrder(ctx: Context, order: any): Promise<str[m
+   return result.signature;[m
+ }[m
+ [m
+[31m-async function executeSwapOrderViaRpc(ctx: Context, order: any): Promise<string> {[m
+[32m+[m[32masync function executeSwapOrderViaRpc(ctx: Context, order: SwapOrder): Promise<string> {[m
+   const wireTransactionBase64 = await signSwapTransaction(ctx, order, false);[m
+ [m
+   const sig = await rpcCall([m
+[36m@@ -403,7 +403,7 @@[m [mexport async function estimateSolUsdValue([m
+  */[m
+ export async function buildPaperBuyQuote([m
+   ctx: Context,[m
+[31m-  token: any,[m
+[32m+[m[32m  token: TokenMetadata,[m
+   decimals: number,[m
+   buyLamports: bigint | string[m
+ ): Promise<{ outAmount: bigint; entryUsdValue: number; entryPriceUsd: number }> {[m
+[1mdiff --git a/src/types/index.ts b/src/types/index.ts[m
+[1mindex 3daa861..f63b072 100644[m
+[1m--- a/src/types/index.ts[m
+[1m+++ b/src/types/index.ts[m
+[36m@@ -170,6 +170,40 @@[m [mexport interface Position {[m
+   volatilityScaler: number;[m
+   entryLiquidityUsd: number;[m
+   lastDriftAuditTime?: number;[m
+[32m+[m[32m  targetsHit?: number;[m
+[32m+[m[32m  lastTakeProfitAt?: string;[m
+[32m+[m[32m  lastTakeProfitMultiple?: number | null;[m
+[32m+[m[32m  lastKnownBalanceRaw?: string;[m
+[32m+[m[32m  lastKnownPriceUsd?: number;[m
+[32m+[m[32m  remainingCostUsd?: number;[m
+[32m+[m[32m  realizedPnlUsd?: number;[m
+[32m+[m[32m  realizedProceedsUsd?: number;[m
+[32m+[m[32m  lastExitReason?: string;[m
+[32m+[m[32m  lastSellSignature?: string;[m
+[32m+[m[32m  stopLossWarningSent?: boolean;[m
+[32m+[m[32m  minTpArmed?: boolean;[m
+[32m+[m[32m  minTpReached?: boolean;[m
+[32m+[m[32m  minTpFirstReachedAt?: number | null;[m
+[32m+[m[32m  initialBuyAmountSol?: string | number | null;[m
+[32m+[m[32m  initialBuyAmountLamports?: string;[m
+[32m+[m[32m  paperEntryQuoteOutAmount?: string;[m
+[32m+[m[32m  trailingArmed?: boolean;[m
+[32m+[m[32m  mintSignals?: any;[m
+[32m+[m[32m  securitySignals?: {[m
+[32m+[m[32m    goPlusToken: any;[m
+[32m+[m[32m    bubbleMaps: any;[m
+[32m+[m[32m  };[m
+[32m+[m[32m  marketData?: {[m
+[32m+[m[32m    price: number | undefined;[m
+[32m+[m[32m    liquidity: number | undefined;[m
+[32m+[m[32m    volume24h: number | undefined;[m
+[32m+[m[32m    buyPressure: number | undefined;[m
+[32m+[m[32m    sellPressure: number | undefined;[m
+[32m+[m[32m  };[m
+[32m+[m[32m  highGrowthConfidence?: boolean;[m
+[32m+[m[32m  lastKnownLiquidityUsd?: number;[m
+[32m+[m[32m  launchpad?: string | null;[m
+[32m+[m[32m  tpProfile?: string | null;[m
+ }[m
+ [m
+ export interface MarketSnapshot {[m
+[36m@@ -222,7 +256,6 @@[m [mexport interface StateMetrics {[m
+   finalAuditRejected: number;[m
+   exitReasonCounts: Record<string, number>;[m
+   rejectionReasons: Record<string, number>;[m
+[31m-  [key: string]: any;[m
+ }[m
+ [m
+ export interface LaunchHistoryEntry {[m
+[36m@@ -238,6 +271,11 @@[m [mexport interface CoolDownEntry {[m
+   lastExitPriceUsd: number;[m
+ }[m
+ [m
+[32m+[m[32mexport interface RetiredMintEntry {[m
+[32m+[m[32m  lastExitPriceUsd?: number;[m
+[32m+[m[32m  [key: string]: any;[m
+[32m+[m[32m}[m
+[32m+[m
+ export interface State {[m
+   processedMintQueue: string[];[m
+   processedMints: Set<string>;[m
+[36m@@ -249,25 +287,85 @@[m [mexport interface State {[m
+   tradeHistory: boolean[];[m
+   moodPauseUntil: number | null;[m
+   coolDownMints: Map<string, CoolDownEntry>;[m
+[31m-  retiredMints: Map<string, any>;[m
+[32m+[m[32m  retiredMints: Map<string, RetiredMintEntry>;[m
+   closedTrades: any[];[m
+   metrics: StateMetrics;[m
+ }[m
+ [m
+[32m+[m[32mexport interface StateStore {[m
+[32m+[m[32m  load(stateFile: string): void;[m
+[32m+[m[32m  trackMint(mint: string): void;[m
+[32m+[m[32m  untrackMint(mint: string): void;[m
+[32m+[m[32m  upsertPosition(position: Position): void;[m
+[32m+[m[32m  removePosition(mint: string): void;[m
+[32m+[m[32m  incrementMetric(key: string, amount?: number): void;[m
+[32m+[m[32m  recordRejection(code: string): void;[m
+[32m+[m[32m  updatePaperSolBalance(amountLamports: bigint | string): void;[m
+[32m+[m[32m  addClosedTrade(trade: any): void;[m
+[32m+[m[32m  incrementExitReason(reason: string): void;[m
+[32m+[m[32m  pauseMood(durationMs: number): void;[m
+[32m+[m[32m  addTradeResult(isWin: boolean): void;[m
+[32m+[m[32m  startCoolDown(mint: string, pUsd: number, expiresAt: number): void;[m
+[32m+[m[32m  updateMarketSnapshot(mint: string, snapshot: MarketSnapshot): void;[m
+[32m+[m[32m  calculateGMI(): number;[m
+[32m+[m[32m  updateLaunchHistory(launches: any[]): void;[m
+[32m+[m[32m  upsertRecheckEntry(entry: RecheckItem): void;[m
+[32m+[m[32m  removeRecheckEntry(mint: string): void;[m
+[32m+[m[32m  removeCoolDown(mint: string): void;[m
+[32m+[m[32m  retireMint(mint: string, data: any): void;[m
+[32m+[m[32m  unretireMint(mint: string): void;[m
+[32m+[m[32m  removeMarketSnapshot(mint: string): void;[m
+[32m+[m[32m  requestShutdown(): void;[m
+[32m+[m[32m  persist(options?: { sync?: boolean; force?: boolean }): Promise<void>;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mexport interface AdjustedThresholds {[m
+[32m+[m[32m  minLiquidityUsd: number;[m
+[32m+[m[32m  minHolderCount: number;[m
+[32m+[m[32m  minBuys5m: number;[m
+[32m+[m[32m  minPoolAgeSeconds: number;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mexport interface EvaluationResult {[m
+[32m+[m[32m  approved: boolean;[m
+[32m+[m[32m  blockers: string[];[m
+[32m+[m[32m  rejectionReasons: { code: string; recheckEligible: boolean }[];[m
+[32m+[m[32m  notes: string[];[m
+[32m+[m[32m  candidateScore: number;[m
+[32m+[m[32m  volatilityScaler: number;[m
+[32m+[m[32m  launchpadProfile: LaunchpadProfile & { name: string };[m
+[32m+[m[32m  adjustedThresholds: AdjustedThresholds;[m
+[32m+[m[32m  token: TokenMetadata;[m
+[32m+[m[32m  mintSignals?: any;[m
+[32m+[m[32m  goPlusTokenSignals?: any;[m
+[32m+[m[32m  bubbleMapsSignals?: any;[m
+[32m+[m[32m}[m
+[32m+[m
+ export interface Context {[m
+   config: Config;[m
+   state: State;[m
+[31m-  rpc: any;[m
+[31m-  rpcs: any[];[m
+[31m-  rpcSubscriptions: any;[m
+[31m-  rpcSubscriptionPool: any[];[m
+[32m+[m[32m  rpc: any; // Rpc<SolanaRpcApi>[m
+[32m+[m[32m  rpcs: any[]; // Rpc<SolanaRpcApi>[][m
+[32m+[m[32m  rpcSubscriptions: any; // RpcSubscriptions<SolanaRpcSubscriptionsApi>[m
+[32m+[m[32m  rpcSubscriptionPool: any[]; // RpcSubscriptions<SolanaRpcSubscriptionsApi>[][m
+   wallet: { address: string; keypair?: any };[m
+   logger: (message: string, level?: string, options?: { console?: boolean }) => void;[m
+[31m-  persistState: () => Promise<void>;[m
+[32m+[m[32m  persistState: (options?: { sync?: boolean; force?: boolean }) => Promise<void>;[m
+   calculateGMI: () => number;[m
+[31m-  store: any;[m
+[32m+[m[32m  store: StateStore;[m
+   recordScanBackpressureEvent?: (error: any) => void;[m
+   getEffectiveParallelism?: (base: number) => number;[m
+[32m+[m[32m  scanBackpressureFactor?: number;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mexport interface SwapOrder {[m
+[32m+[m[32m  transaction: string;[m
+[32m+[m[32m  lastValidBlockHeight?: number;[m
+[32m+[m[32m  requestId?: string;[m
+[32m+[m[32m  errorMessage?: string;[m
+[32m+[m[32m  error?: string;[m
+[32m+[m[32m  inUsdValue?: number | string;[m
+[32m+[m[32m  outAmount?: string;[m
+ }[m
+ [m
+ export interface WalletBalance {[m

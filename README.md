@@ -15,14 +15,15 @@
 
 Veloci-Buy is built on a decoupled, service-oriented architecture that prioritizes modularity and low-latency execution:
 
-- **Orchestration (`bot.js`)**: Manages the high-precision loop watchdogs, system lifecycle, and global event coordination.
-- **Scanner Service (`scanner.js`)**: Handles candidate identification, multi-stage audit scheduling, and re-audit logic for tokens discovered via polling or WebSocket.
-- **Event Ingestion (`discovery.js`)**: A high-speed pipeline for real-time monitoring of program logs. Features direct log parsing for sub-second discovery.
-- **Heuristic Decision Engine (`engine.js`)**: Filters candidates through complex scoring models, including momentum analysis and survival timeframes.
-- **Security Audit Suite (`audit.js`)**: Performs deep on-chain inspection of mint/freeze authorities and holder concentration, integrated with external security signals.
-- **Parallel Execution Adapter (`trading.js`)**: A zero-wait Jupiter integration that pre-builds transactions during the audit phase to shave hundreds of milliseconds off execution.
-- **Risk Management (`monitor.js`)**: Automated position monitoring with dynamic TP/SL execution and trailing drawdown protection.
-- **State Management (`store.js`)**: Centralized state store with incremental persistence to keep the event loop responsive during high-frequency operations.
+- **Orchestration ([src/index.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/index.ts))**: Manages high-precision loop watchdogs, system lifecycle, and global event coordination.
+- **Scanner Service ([src/services/scanner/scanner.service.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/services/scanner/scanner.service.ts))**: Handles candidate identification, multi-stage audit scheduling, and re-audit loops.
+- **Event Ingestion ([src/services/discovery/discovery.service.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/services/discovery/discovery.service.ts))**: A high-speed log ingestion and parsing pipeline for real-time WebSocket discovery.
+- **Heuristic Engine ([src/services/engine/engine.service.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/services/engine/engine.service.ts))**: Scores candidates using organic traction metrics, GMI filters, and momentum analysis.
+- **Security Audit ([src/services/audit/audit.service.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/services/audit/audit.service.ts))**: Direct RPC-based authority audits and smart holder concentration checks.
+- **Execution Adapter ([src/services/trading/trading.service.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/services/trading/trading.service.ts))**: Jupiter swap builder supporting paper simulations, dry-runs, and live orders.
+- **Risk Monitor ([src/services/monitor/monitor.service.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/services/monitor/monitor.service.ts))**: Dynamic profit targets, trailing stop-losses, insider drift guards, and spread velocity exit checks.
+- **State Store ([src/core/store.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/core/store.ts))**: Atomically persists runtime states, cool-downs, and historical stats.
+- **Toolkit ([src/core/utils.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/core/utils.ts))**: Shared logging, serialization, notification, and async flow pools.
 
 ---
 
@@ -176,37 +177,28 @@ The console will display the overall sessions ingested, total trades, grid combo
 
 ## Changelog
 
-### v2.x - Code Quality & Maintainability Milestone
+### v2.x — Type Hardening & Migration Finalization
 
-- **Dynamic Syntax Validation**: Introduced recursive `check-syntax.js` validator, ensuring no JS file bypasses CI syntax checks.
-- **Strict ESLint Rules**: Enforced `'use strict';` global declarations, modern block scoping (`no-var`, `prefer-const`), strict type-safe equality (`===`), and variable shadowing protection.
-- **Codebase Cleanups**: Fixed shadowing bugs in `audit.js` and `utils.js`, converted unassigned variables to `const` in `discovery.js`, `monitor.js`, and `trading.js`.
-- **Prettier Dev Commands**: Added `npm run format` for developer ergonomics to format in-place.
+- **Complete TypeScript Transition**: Migrated the final major logic block, `analyze.js` (Post-Session Optimizer), to `src/core/analyze.ts` with full type safety for trade replays and grid search.
+- **Comprehensive Type Hardening**: Hardened over 50 core interfaces (`Position`, `Context`, `State`, `SwapOrder`) and audit signal structures. Removed dozens of `any` casts and intersection types across all services (`monitor`, `trading`, `scanner`, `audit`).
+- **Strict Data Contracts**: Established formal interfaces for financial transactions and security signals, ensuring compile-time verification of the entire trading pipeline.
+- **Architectural Cleanup**: Formalized the `StateStore` interface to resolve circular dependencies while maintaining strict typing for the global context.
 
-### v2.x - Performance & Reliability Milestone
+### v2.x — TypeScript Migration & Code Quality Overhaul
 
-- **Sub-Second Discovery**: Optimized `discovery.js` with direct Pump.fun log parsing, bypassing RPC indexing lag.
-- **Decoupled Orchestrator**: Extracted scanning and scheduling logic into a dedicated `scanner.js` service for better modularity.
-- **Batch Audit Inspection**: Refactored `audit.js` to use `getMultipleAccounts`, reducing audit latency by consolidating RPC requests.
-- **Smart RPC Failover**: Implemented a unified RPC provider layer with real-time health tracking and automatic failover.
-- **API Circuit Breakers**: Added fail-safe modes for GoPlus and BubbleMaps to handle external API outages gracefully.
-- **Incremental Persistence**: Refactored `store.js` to split state into frequent and lazy files, ensuring event loop responsiveness.
-- **Granular WS Watchdog**: Enhanced WebSocket monitoring to track activity on a per-program basis, improving failure detection.
+- **Full TypeScript Migration**: Ported codebase to TypeScript with strict validation flags enabled (`strict: true`, `noImplicitAny: true`). Established central type declarations in [src/types/index.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/types/index.ts).
+- **Decoupled Layout**: Reorganized core codebase into a `src/` directory layout separated into `core` and `services`.
+- **Backward-Compatible Wrappers**: Built backwards-compatible CommonJS exports resolving to the compiled `dist/` directory outputs, allowing legacy CJS scripts and modular test suites to run unmodified.
+- **Prettier & ESLint Guardrails**: Re-configured ESLint flat config with global ignores for compiled and artifact paths. Formatted codebase using Prettier rules.
 
-### v2.x - Trade Replay Analyzer & Logging Enhancements
+### v2.x — Performance, Quant Strategy & Parameter Optimization
 
-- **Trade Replay Analyzer**: New `analyze.js` module for post-session parameter optimization via 7-variable grid scanning across 9,216 combos.
-- **Enriched Trade Journaling**: `recordClosedTrade` now persists 18 fields including entry score, TP profile, volatility scaler, and launchpad for accurate replay analysis.
-- **JSONL Journal Format**: Renamed `paper-trade-journal.json` to `.jsonl` for proper line-delimited parsing; added `journalClosedTrade` utility in `utils.js`.
-
-### v2.x - Quant Strategy Upgrades
-
-- **Decommissioned Backtesting**: Removed legacy `recorder.js` and `backtest.js` to focus on real-time execution and reduce codebase bloat.
-- **Global Momentum Index (GMI)**: New market-wide filter tracking the success rate of the last 100 launches to dynamically adjust entry aggression.
-- **Volatility-Adaptive Risk**: Introduced a **Volatility Scaler** that scales Stop-Loss levels based on price standard deviation during discovery.
-- **Accelerated Trailing Stop**: Implemented a parabolic-style trailing stop that tightens as profit multiples increase beyond 1.8x.
-- **Insider Drift Tracking**: Continuous post-entry monitoring of the top 5 holders; triggers a 40% de-risk sell if any insider sells >25%.
-- **Spread Velocity Detection**: Emergency exit trigger that detects rapid bid/ask spread widening (>50% in <15s) to front-run liquidity removals.
+- **Quant Strategy Upgrades**: Added **Global Momentum Index (GMI)** market filter, **Volatility-Adaptive Risk** scaling Stop-Loss, **Accelerated Trailing Stop**, **Insider Drift Tracking** de-risk sold positions on large dumps, and **Spread Velocity Widened Exits**. Decommissioned legacy backtester.
+- **Post-Session Parameter Optimizer**: Created `analyze.js` trade replay analyzer to run 9,216 strategy combo backtests over JSONL journals. Enriched trade logs with 18 fields.
+- **Sub-Second Discovery**: Direct log parsing for Pump.fun log events, bypassing indexing RPC delays.
+- **Batch Audits & RPC Health**: Consolidated audits using `getMultipleAccounts` and added unified RPC failover health trackers.
+- **API Circuit Breakers**: Built local on-chain heuristic fallbacks for GoPlus/BubbleMaps outages.
+- **Decoupled Orchestration**: Split scanner and audit scheduling logic from core watchdog loops.
 
 ---
 
@@ -216,4 +208,4 @@ The console will display the overall sessions ingested, total trades, grid combo
 
 ---
 
-_Developed with focus on speed, safety, and scalability. v2.1 - Quant Strategy Upgrade._
+_Developed with focus on speed, safety, and scalability. v2.3 - Type Hardening & Migration Finalization._

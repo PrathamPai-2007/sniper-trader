@@ -1,6 +1,6 @@
 {
   "name": "veloci-buy",
-  "version": "0.1.0",
+  "version": "2.3.0",
   "private": true,
   "description": "High-performance Solana discovery and execution engine with Jupiter execution and staged audit filters.",
   "main": "bot.js",
@@ -8,14 +8,16 @@
     "node": ">=20.19.0"
   },
   "scripts": {
-    "start": "node bot.js",
-    "test": "node --test",
+    "build": "tsc",
+    "start": "tsx src/index.ts",
+    "start:prod": "node dist/index.js",
+    "test": "node --import tsx --test tests/*.test.js",
     "check": "node scripts/check-syntax.js",
     "lint": "eslint .",
     "format:check": "prettier --check .",
     "format": "prettier --write .",
     "audit": "npm audit",
-    "ci": "npm run audit && npm run check && npm run lint && npm run format:check && npm test"
+    "ci": "npm run audit && npm run check && npm run lint && npm run format:check && npm run build && npm test"
   },
   "dependencies": {
     "@jup-ag/api": "^6.0.48",
@@ -28,7 +30,12 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/node": "^25.9.1",
+    "@typescript-eslint/eslint-plugin": "^8.60.0",
+    "@typescript-eslint/parser": "^8.60.0",
     "eslint": "^10.3.0",
-    "prettier": "^3.8.3"
+    "prettier": "^3.8.3",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3"
   }
 }

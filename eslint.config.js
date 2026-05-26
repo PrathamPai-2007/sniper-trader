@@ -4,10 +4,12 @@
 const js = require('@eslint/js');
 
 module.exports = [
+  {
+    ignores: ['node_modules/**', 'logs/**', '.cursor/**', 'dist/**', '.test-artifacts/**'],
+  },
   js.configs.recommended,
   {
     files: ['**/*.js'],
-    ignores: ['node_modules/**', 'logs/**', '.cursor/**'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'script',

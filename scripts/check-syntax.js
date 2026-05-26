@@ -12,6 +12,7 @@ const IGNORED_DIRS = new Set([
   '.antigravitycli',
   '.cursor',
   'coverage',
+  'dist',
 ]);
 
 /**
