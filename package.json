@@ -1,6 +1,6 @@
 {
   "name": "veloci-buy",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "private": true,
   "description": "High-performance Solana discovery and execution engine with Jupiter execution and staged audit filters.",
   "main": "bot.js",
@@ -17,6 +17,7 @@
     "format:check": "prettier --check .",
     "format": "prettier --write .",
     "audit": "npm audit",
+    "analyze-pnl": "tsx src/core/pnl-analyzer.ts",
     "ci": "npm run audit && npm run check && npm run lint && npm run format:check && npm run build && npm test"
   },
   "dependencies": {

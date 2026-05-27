@@ -291,6 +291,8 @@ export async function buyCandidate(
         return null;
       }
       const quote = await trading.buildPaperBuyQuote(ctx, token, decimals, buyLamports);
+      const entryPriceSol = quote.entryPriceUsd / quote.solPrice;
+      const entrySolValue = Number(atomicToDecimalString(buyLamports, 9, 9));
       ctx.store.updatePaperSolBalance(BigInt(ctx.state.paperSolBalanceLamports) - buyLamports);
       const pos = {
         mint: token.id,
@@ -300,6 +302,7 @@ export async function buyCandidate(
         openedAt: new Date().toISOString(),
         mode: 'paper' as const,
         entryPriceUsd: quote.entryPriceUsd,
+        entryPriceSol,
         entryUsdValue: quote.entryUsdValue,
         initialBuyAmountSol: buySolText,
         initialBuyAmountLamports: buyLamports.toString(),
@@ -316,8 +319,11 @@ export async function buyCandidate(
         highestPriceUsd: quote.entryPriceUsd,
         partiallyClosed: false,
         remainingCostUsd: quote.entryUsdValue,
+        remainingCostSol: entrySolValue,
         realizedPnlUsd: 0,
+        realizedPnlSol: 0,
         realizedProceedsUsd: 0,
+        realizedProceedsSol: 0,
         entryLiquidityUsd: Number(token.liquidity || 0),
         lastKnownLiquidityUsd: Number(token.liquidity || 0),
         volatilityScaler: evaluation.volatilityScaler || 0,
@@ -379,6 +385,9 @@ export async function buyCandidate(
       Number(order.inUsdValue || 0) > 0
         ? Number(order.inUsdValue)
         : await trading.estimateSolUsdValue(ctx, buyLamports);
+    const solPrice = await trading.estimateSolUsdPrice(ctx);
+    const entryPriceSol = (token.usdPrice || 0) / solPrice;
+    const entrySolValue = Number(atomicToDecimalString(buyLamports, 9, 9));
     const beforeBalance = await trading.getWalletTokenBalance(ctx, token.id, PRIORITY.HIGH);
     if (ctx.config.dryRun) {
       ctx.logger(`DRY_RUN would buy ${token.symbol} for ${buySolText} SOL.`, 'trade');
@@ -410,6 +419,7 @@ export async function buyCandidate(
       openedAt: new Date().toISOString(),
       mode: 'live' as const,
       entryPriceUsd,
+      entryPriceSol,
       entryUsdValue,
       initialBuyAmountSol: buySolText,
       initialBuyAmountLamports: buyLamports.toString(),
@@ -426,8 +436,11 @@ export async function buyCandidate(
       highestPriceUsd: entryPriceUsd,
       partiallyClosed: false,
       remainingCostUsd: entryUsdValue,
+      remainingCostSol: entrySolValue,
       realizedPnlUsd: 0,
+      realizedPnlSol: 0,
       realizedProceedsUsd: 0,
+      realizedProceedsSol: 0,
       entryLiquidityUsd: Number(token.liquidity || 0),
       lastKnownLiquidityUsd: Number(token.liquidity || 0),
       volatilityScaler: evaluation.volatilityScaler || 0,

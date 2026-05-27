@@ -186,7 +186,34 @@ The console will display the overall sessions ingested, total trades, grid combo
 
 ---
 
+## PnL & Gross Profit Reporting (`npm run analyze-pnl`)
+
+Veloci-Buy includes a dedicated **PnL Analyzer** utility to generate "legally correct" and audit-ready reports for every trading session. This feature ensures high-fidelity tracking of both USD and SOL-denominated profits and losses.
+
+### Features
+
+- **SOL & USD Denomination**: Full visibility into profits and losses in both native SOL and USD.
+- **Gross Profit & Lost Value**: Explicitly calculates the sum of all winning and losing trades.
+- **Detailed Transaction History**: Generates a timestamped table of every buy and sell event, including entry prices, exit prices, and realized PnL.
+- **Legal Compliance**: Provides a structured Markdown report (`pnl-report.md`) within the session log folder, suitable for tax and audit purposes.
+
+### Usage
+
+To generate a report for a specific session:
+
+```bash
+npm run analyze-pnl logs/paper-trading/(session timestamp)
+```
+
+---
+
 ## v2.x Changelog
+
+### PnL Analyzer & Legal Reporting
+
+- **PnL & Gross Profit Analyzer**: Introduced a new reporting engine that calculates Gross Profit, Lost Value, and Net PnL in both SOL and USD.
+- **Enhanced Financial Tracking**: Modified the core trading pipeline to record explicit SOL-denominated proceeds and prices at the time of execution.
+- **Audit-Ready Reports**: Automated generation of `pnl-report.md` for post-session analysis and legal compliance.
 
 ### Persistence Resilience & Class-Based Refactor
 

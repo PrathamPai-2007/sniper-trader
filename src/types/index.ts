@@ -186,6 +186,7 @@ export interface Position {
   openedAt: string;
   mode: 'paper' | 'live';
   entryPriceUsd: number;
+  entryPriceSol?: number;
   entryUsdValue: number;
   entryScore: number;
   initialTokenAmountRaw: string;
@@ -206,8 +207,11 @@ export interface Position {
   lastKnownBalanceRaw?: string;
   lastKnownPriceUsd?: number;
   remainingCostUsd?: number;
+  remainingCostSol?: number;
   realizedPnlUsd?: number;
+  realizedPnlSol?: number;
   realizedProceedsUsd?: number;
+  realizedProceedsSol?: number;
   lastExitReason?: string;
   lastSellSignature?: string;
   stopLossWarningSent?: boolean;
@@ -319,9 +323,12 @@ export interface ClosedTrade {
   symbol: string;
   exitReason: string;
   realizedPnlUsd: number;
+  realizedPnlSol?: number;
   realizedProceedsUsd: number;
+  realizedProceedsSol?: number;
   entryUsdValue: number;
   entryPriceUsd: number;
+  entryPriceSol?: number;
   highestPriceUsd: number;
   holdSeconds: number;
   closedAt: string;

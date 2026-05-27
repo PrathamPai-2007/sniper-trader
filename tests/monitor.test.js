@@ -143,6 +143,7 @@ test('monitor closes live positions on stop-loss and records metrics', async () 
   await withPatchedMembers(
     trading,
     {
+      estimateSolUsdPrice: async () => 200,
       fetchSwapOrder: async () => ({ transaction: 'mock-order' }),
       executeSwapOrder: async () => 'mock-signature',
       getWalletTokenBalance: async () => {
@@ -193,6 +194,7 @@ test('monitor triggers stop-loss before the minimum hold time elapses', async ()
   await withPatchedMembers(
     trading,
     {
+      estimateSolUsdPrice: async () => 200,
       fetchSwapOrder: async () => ({ transaction: 'mock-order' }),
       executeSwapOrder: async () => 'mock-signature',
       getWalletTokenBalance: async () => {
@@ -246,6 +248,7 @@ test('monitor triggers liquidity exits before the minimum hold time elapses', as
   await withPatchedMembers(
     trading,
     {
+      estimateSolUsdPrice: async () => 200,
       fetchSwapOrder: async () => ({ transaction: 'mock-order' }),
       executeSwapOrder: async () => 'mock-signature',
       getWalletTokenBalance: async () => {

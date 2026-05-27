@@ -295,8 +295,20 @@ async function signSwapTransaction(
   const transactionBytes = Buffer.from(order.transaction, 'base64');
   const transaction = getTransactionDecoder().decode(transactionBytes);
   const signer = allowPartialSignatures ? partiallySignTransaction : signTransaction;
+  const keypairObj = ctx.wallet.keypair;
+  if (!keypairObj) {
+    throw new Error('Wallet keypair is not configured/available.');
+  }
+
+  let cryptoKeyPair: unknown;
+  if (typeof keypairObj === 'object' && keypairObj !== null && 'keyPair' in keypairObj) {
+    cryptoKeyPair = (keypairObj as { keyPair: unknown }).keyPair;
+  } else {
+    cryptoKeyPair = keypairObj;
+  }
+
   const signedTransaction = await signer(
-    [ctx.wallet.keypair],
+    [cryptoKeyPair as Parameters<typeof signer>[0][number]],
     transaction as Parameters<typeof signer>[1]
   );
   return getSignedTransactionBase64(signedTransaction);
@@ -447,15 +459,21 @@ export async function buildPaperBuyQuote(
   token: TokenMetadata,
   decimals: number,
   buyLamports: bigint | string
-): Promise<{ outAmount: bigint; entryUsdValue: number; entryPriceUsd: number }> {
+): Promise<{
+  outAmount: bigint;
+  entryUsdValue: number;
+  entryPriceUsd: number;
+  solPrice: number;
+}> {
   const p = Number(token.usdPrice || 0);
   if (!(p > 0)) throw new Error(`No price for paper buy ${token.symbol}.`);
+  const solPrice = await estimateSolUsdPrice(ctx);
   const val = await estimateSolUsdValue(ctx, buyLamports);
   const units = val / p;
   const raw = BigInt(decimalToAtomic(units.toFixed(Math.min(decimals, 9)), decimals));
   const out = (raw * BigInt(Math.max(0, 10000 - ctx.config.slippageBps))) / 10000n;
   if (out <= 0n) throw new Error('Paper buy rounded to zero.');
-  return { outAmount: out, entryUsdValue: val, entryPriceUsd: p };
+  return { outAmount: out, entryUsdValue: val, entryPriceUsd: p, solPrice };
 }
 
 /**
@@ -467,12 +485,12 @@ export async function buildPaperSellQuote(
   pUsd: number,
   dec: number,
   apiKey: string | null = null
-): Promise<{ outAmount: bigint; grossUsdValue: number }> {
+): Promise<{ outAmount: bigint; grossUsdValue: number; solPrice: number }> {
   if (!(pUsd > 0)) throw new Error('No price for paper sell.');
-  const solP = await estimateSolUsdPrice(ctx, apiKey);
+  const solPrice = await estimateSolUsdPrice(ctx, apiKey);
   const val = Number(atomicToDecimalString(rawAmount, dec, 9)) * pUsd;
-  const rawLamports = BigInt(decimalToAtomic((val / solP).toFixed(9), 9));
+  const rawLamports = BigInt(decimalToAtomic((val / solPrice).toFixed(9), 9));
   const out = (rawLamports * BigInt(Math.max(0, 10000 - ctx.config.slippageBps))) / 10000n;
   if (out <= 0n) throw new Error('Paper sell rounded to zero.');
-  return { outAmount: out, grossUsdValue: val };
+  return { outAmount: out, grossUsdValue: val, solPrice };
 }

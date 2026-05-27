@@ -230,22 +230,25 @@ export class VelociBuyBot {
       if (this.watchdogBusy || !this.config.discoveryWsEnabled) return;
       this.watchdogBusy = true;
       try {
-        let stale = false;
+        let allStale = true;
         const stalePrograms: string[] = [];
         const now = Date.now();
 
         for (const [programId, lastSeen] of discovery.discoveryState.lastEventAt.entries()) {
           const idleTime = now - lastSeen;
           if (idleTime > this.config.websocketStaleThresholdMs) {
-            stale = true;
             stalePrograms.push(programId);
+          } else {
+            allStale = false;
           }
         }
 
-        if (stale) {
+        const isStale = allStale && discovery.discoveryState.lastEventAt.size > 0;
+
+        if (isStale) {
           log(
             this.config.logFile,
-            `WebSocket stream is STALE for programs: ${stalePrograms.join(', ')}. Attempting RECONNECT...`,
+            `WebSocket stream is STALE for all programs: ${stalePrograms.join(', ')}. Attempting RECONNECT...`,
             'warn',
             { console: true }
           );

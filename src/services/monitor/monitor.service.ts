@@ -76,7 +76,14 @@ export async function executePositionExit(
       ctx.config.jupiterPositionApiKey
     );
     const remain = balance.rawAmount - sellRaw;
-    const accounting = buildExitAccounting(pos, sellRaw, balance.rawAmount, quote.grossUsdValue);
+    const proceedsSol = Number(atomicToDecimalString(quote.outAmount, 9, 9));
+    const accounting = buildExitAccounting(
+      pos,
+      sellRaw,
+      balance.rawAmount,
+      quote.grossUsdValue,
+      proceedsSol
+    );
     ctx.store.updatePaperSolBalance(BigInt(ctx.state.paperSolBalanceLamports) + quote.outAmount);
     if (reason.startsWith('take-profit')) pos.targetsHit++;
     pos.lastTakeProfitAt = new Date().toISOString();
@@ -84,8 +91,11 @@ export async function executePositionExit(
     pos.lastKnownBalanceRaw = remain.toString();
     pos.lastKnownPriceUsd = pUsd;
     pos.remainingCostUsd = accounting.remainingCostUsd;
+    pos.remainingCostSol = accounting.remainingCostSol;
     pos.realizedPnlUsd = (pos.realizedPnlUsd || 0) + accounting.realizedPnlUsd;
+    pos.realizedPnlSol = (pos.realizedPnlSol || 0) + accounting.realizedPnlSol;
     pos.realizedProceedsUsd = (pos.realizedProceedsUsd || 0) + quote.grossUsdValue;
+    pos.realizedProceedsSol = (pos.realizedProceedsSol || 0) + proceedsSol;
     pos.lastExitReason = reason;
     if (remain > 0n) ctx.store.upsertPosition(pos);
     else {
@@ -105,7 +115,9 @@ export async function executePositionExit(
       priceUsd: pUsd,
       tokenAmount: sellRaw.toString(),
       proceedsUsd: quote.grossUsdValue,
+      proceedsSol: proceedsSol,
       realizedPnlUsd: accounting.realizedPnlUsd,
+      realizedPnlSol: accounting.realizedPnlSol,
       reason,
       mode: 'paper',
     });
@@ -124,16 +136,21 @@ export async function executePositionExit(
   const sig = await trading.executeSwapOrder(ctx, order);
   await sleep(2000);
   const upBal = await trading.getWalletTokenBalance(ctx, pos.mint);
-  const proceeds = Number(atomicToDecimalString(sellRaw, pos.decimals, 9)) * pUsd;
-  const acc = buildExitAccounting(pos, sellRaw, balance.rawAmount, proceeds);
+  const proceedsUsd = Number(atomicToDecimalString(sellRaw, pos.decimals, 9)) * pUsd;
+  const solPrice = await trading.estimateSolUsdPrice(ctx);
+  const proceedsSol = proceedsUsd / solPrice;
+  const acc = buildExitAccounting(pos, sellRaw, balance.rawAmount, proceedsUsd, proceedsSol);
   if (reason.startsWith('take-profit')) pos.targetsHit++;
   pos.lastTakeProfitAt = new Date().toISOString();
   pos.lastTakeProfitMultiple = targetM;
   pos.lastKnownBalanceRaw = upBal.rawAmount.toString();
   pos.lastKnownPriceUsd = pUsd;
   pos.remainingCostUsd = acc.remainingCostUsd;
+  pos.remainingCostSol = acc.remainingCostSol;
   pos.realizedPnlUsd = (pos.realizedPnlUsd || 0) + acc.realizedPnlUsd;
-  pos.realizedProceedsUsd = (pos.realizedProceedsUsd || 0) + proceeds;
+  pos.realizedPnlSol = (pos.realizedPnlSol || 0) + acc.realizedPnlSol;
+  pos.realizedProceedsUsd = (pos.realizedProceedsUsd || 0) + proceedsUsd;
+  pos.realizedProceedsSol = (pos.realizedProceedsSol || 0) + proceedsSol;
   pos.lastExitReason = reason;
   pos.lastSellSignature = sig;
   const totalT = Array.isArray(pos.takeProfitMultiples)
@@ -182,13 +199,22 @@ export function buildExitAccounting(
   pos: Position,
   sellRaw: bigint,
   balRaw: bigint,
-  proceeds: number
-): { realizedPnlUsd: number; remainingCostUsd: number } {
+  proceedsUsd: number,
+  proceedsSol: number
+): {
+  realizedPnlUsd: number;
+  realizedPnlSol: number;
+  remainingCostUsd: number;
+  remainingCostSol: number;
+} {
   const ratio = bigintRatioToNumber(sellRaw, balRaw);
-  const costSold = Number(pos.remainingCostUsd || 0) * ratio;
+  const costSoldUsd = Number(pos.remainingCostUsd || 0) * ratio;
+  const costSoldSol = Number(pos.remainingCostSol || 0) * ratio;
   return {
-    realizedPnlUsd: proceeds - costSold,
-    remainingCostUsd: Math.max(0, Number(pos.remainingCostUsd || 0) - costSold),
+    realizedPnlUsd: proceedsUsd - costSoldUsd,
+    realizedPnlSol: proceedsSol - costSoldSol,
+    remainingCostUsd: Math.max(0, Number(pos.remainingCostUsd || 0) - costSoldUsd),
+    remainingCostSol: Math.max(0, Number(pos.remainingCostSol || 0) - costSoldSol),
   };
 }
 
@@ -317,9 +343,12 @@ export function recordClosedTrade(ctx: Context, pos: Position, reason: string): 
     symbol: pos.symbol,
     exitReason: reason,
     realizedPnlUsd: Number(pos.realizedPnlUsd || 0),
+    realizedPnlSol: Number(pos.realizedPnlSol || 0),
     realizedProceedsUsd: Number(pos.realizedProceedsUsd || 0),
+    realizedProceedsSol: Number(pos.realizedProceedsSol || 0),
     entryUsdValue: Number(pos.entryUsdValue || 0),
     entryPriceUsd: Number(pos.entryPriceUsd || 0),
+    entryPriceSol: Number(pos.entryPriceSol || 0),
     highestPriceUsd: Number(pos.highestPriceUsd || pos.entryPriceUsd || 0),
     holdSeconds: Math.max(0, (Date.now() - openedAtMs) / 1000),
     closedAt: new Date().toISOString(),
