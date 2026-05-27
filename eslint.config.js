@@ -1,7 +1,8 @@
 'use strict';
 
-// ESLint flat config for project-wide JS linting in CommonJS runtime.
 const js = require('@eslint/js');
+const tsParser = require('@typescript-eslint/parser');
+const tsPlugin = require('@typescript-eslint/eslint-plugin');
 
 module.exports = [
   {
@@ -9,10 +10,11 @@ module.exports = [
   },
   js.configs.recommended,
   {
-    files: ['**/*.js'],
+    files: ['**/*.js', '**/*.ts'],
     languageOptions: {
+      parser: tsParser,
       ecmaVersion: 'latest',
-      sourceType: 'script',
+      sourceType: 'module',
       globals: {
         console: 'readonly',
         process: 'readonly',
@@ -29,21 +31,26 @@ module.exports = [
         __dirname: 'readonly',
         global: 'readonly',
         URLSearchParams: 'readonly',
+        BigInt: 'readonly',
       },
     },
+    plugins: {
+      '@typescript-eslint': tsPlugin,
+    },
     rules: {
-      strict: ['error', 'global'],
       eqeqeq: ['error', 'always', { null: 'ignore' }],
       'no-var': 'error',
       'prefer-const': 'error',
-      'no-undef': 'error',
-      'no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+      'no-undef': 'off', // TypeScript handles this
+      'no-unused-vars': 'off', // Use TS version
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
+      ],
       'no-constant-condition': ['error', { checkLoops: false }],
       'no-empty': 'off',
-      'no-useless-assignment': 'off',
-      'no-unsafe-optional-chaining': 'off',
-      'preserve-caught-error': 'off',
-      'no-shadow': 'error',
+      'no-shadow': 'off', // Use TS version
+      '@typescript-eslint/no-shadow': 'error',
       'no-new-wrappers': 'error',
       'no-eval': 'error',
       'no-implied-eval': 'error',
@@ -53,6 +60,32 @@ module.exports = [
       'no-template-curly-in-string': 'error',
       'array-callback-return': 'error',
       'no-sequences': 'error',
+      '@typescript-eslint/no-explicit-any': 'error',
+      '@typescript-eslint/explicit-module-boundary-types': 'off', // Enabled per-file below
+    },
+  },
+  {
+    files: ['**/*.ts'],
+    languageOptions: {
+      parserOptions: {
+        project: './tsconfig.json',
+      },
+    },
+    rules: {
+      '@typescript-eslint/no-unsafe-assignment': 'error',
+      '@typescript-eslint/no-unsafe-call': 'error',
+      '@typescript-eslint/no-unsafe-member-access': 'error',
+      '@typescript-eslint/no-unsafe-return': 'error',
+      '@typescript-eslint/explicit-module-boundary-types': 'error',
+    },
+  },
+  {
+    files: ['**/*.js'],
+    languageOptions: {
+      sourceType: 'script',
+    },
+    rules: {
+      strict: ['error', 'global'],
     },
   },
 ];

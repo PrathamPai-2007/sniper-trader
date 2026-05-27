@@ -30,8 +30,10 @@ function loadDotEnv(): void {
         process.env[keyTrimmed] = valueRaw.replace(/^["'](.*)["']$/, '$1');
       }
     });
-  } catch (err: any) {
-    console.warn(`[CONFIG] Failed to parse .env file: ${err.message}`);
+  } catch (err: unknown) {
+    console.warn(
+      `[CONFIG] Failed to parse .env file: ${err instanceof Error ? err.message : String(err)}`
+    );
   }
 }
 
@@ -401,8 +403,8 @@ export function loadConfig(): Config {
     dryRun: booleanFromEnv('DRY_RUN', true),
     paperTrading,
     liveTradingEnabled: booleanFromEnv('LIVE_TRADING_ENABLED', false),
-    initialPaperSolText: process.env.INITIAL_PAPER_SOL || '1',
-    initialPaperSolLamports: BigInt(decimalToAtomic(process.env.INITIAL_PAPER_SOL || '1', 9)),
+    initialPaperSolText: process.env.INITIAL_PAPER_SOL || '0.1',
+    initialPaperSolLamports: BigInt(decimalToAtomic(process.env.INITIAL_PAPER_SOL || '0.1', 9)),
     sessionDir,
     stateFile: stateFile ? path.join(sessionDir, path.basename(stateFile)) : '',
     logFile: path.join(sessionDir, path.basename(logFile)),
@@ -509,13 +511,13 @@ export function loadConfig(): Config {
  * @returns True if the configuration is valid.
  * @throws {Error} If validation errors are found.
  */
-export function validateStartupConfig(config: any): boolean {
+export function validateStartupConfig(config: Config): boolean {
   if (!config || typeof config !== 'object') {
     throw new Error('Startup configuration error: config object is required.');
   }
 
   const errors: string[] = [];
-  const positiveFields = [
+  const positiveFields: Array<keyof Config> = [
     'scanIntervalMs',
     'discoveryPollIntervalMs',
     'discoveryWsDebounceMs',
@@ -541,7 +543,7 @@ export function validateStartupConfig(config: any): boolean {
   for (const field of positiveFields) {
     const value = Number(config[field]);
     if (!Number.isFinite(value) || value <= 0) {
-      errors.push(`${field} must be a positive number.`);
+      errors.push(`${String(field)} must be a positive number.`);
     }
   }
 
@@ -582,7 +584,7 @@ export function validateStartupConfig(config: any): boolean {
   if (
     !Array.isArray(config.takeProfitMultiples) ||
     config.takeProfitMultiples.length === 0 ||
-    config.takeProfitMultiples.some((v: any) => !Number.isFinite(v) || v <= 1)
+    config.takeProfitMultiples.some((v) => !Number.isFinite(v) || v <= 1)
   ) {
     errors.push('takeProfitMultiples must contain one or more values greater than 1.');
   }

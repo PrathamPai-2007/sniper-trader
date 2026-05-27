@@ -3,11 +3,12 @@ import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import https from 'node:https';
 import { address } from '@solana/addresses';
+import { SolanaRpcApi } from '@solana/rpc';
 import bs58 from 'bs58';
 import { Context } from '../types/index.js';
 
 // Declare require for compiler compatibility in CommonJS compilation target
-declare const require: any;
+declare const require: (id: string) => unknown;
 
 /**
  * Ensures that the parent directory for a given file path exists.
@@ -34,16 +35,21 @@ export async function atomicWriteFile(filePath: string, content: string): Promis
   const tempPath = `${resolvedPath}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
 
   const maxRetries = 5;
-  let lastError: any;
+  let lastError: unknown;
 
   for (let i = 0; i < maxRetries; i++) {
     try {
       await fsPromises.writeFile(tempPath, content, 'utf8');
       await fsPromises.rename(tempPath, resolvedPath);
       return; // Success
-    } catch (err: any) {
+    } catch (err: unknown) {
       lastError = err;
-      if ((err.code === 'EPERM' || err.code === 'EBUSY') && i < maxRetries - 1) {
+      if (
+        err instanceof Error &&
+        ((err as { code?: string }).code === 'EPERM' ||
+          (err as { code?: string }).code === 'EBUSY') &&
+        i < maxRetries - 1
+      ) {
         await sleep(50 * (i + 1));
         continue;
       }
@@ -52,7 +58,9 @@ export async function atomicWriteFile(filePath: string, content: string): Promis
   }
 
   console.error(
-    `[SYSTEM ERROR] Atomic write failed for ${filePath} after retries: ${lastError?.message}`
+    `[SYSTEM ERROR] Atomic write failed for ${filePath} after retries: ${
+      lastError instanceof Error ? lastError.message : String(lastError)
+    }`
   );
   try {
     if (fs.existsSync(tempPath)) await fsPromises.unlink(tempPath);
@@ -96,10 +104,10 @@ export function appendFileLineSync(filePath: string, line: string): void {
  * @param space - Optional pretty-print spacing.
  * @returns JSON string output safe for persistence/logging.
  */
-export function safeJsonStringify(value: any, space?: number | string): string {
+export function safeJsonStringify(value: unknown, space?: number | string): string {
   return JSON.stringify(
     value,
-    (_key, currentValue) =>
+    (_key, currentValue: unknown) =>
       typeof currentValue === 'bigint' ? currentValue.toString() : currentValue,
     space
   );
@@ -281,8 +289,8 @@ export function deriveWsRpcUrl(rpcUrl: string): string {
  * @param error - The error to check.
  * @returns True if the error is transient.
  */
-export function isTransientOperationError(error: any): boolean {
-  const msg = String(error?.message || error || '').toLowerCase();
+export function isTransientOperationError(error: unknown): boolean {
+  const msg = String((error as { message?: string })?.message || error || '').toLowerCase();
   return (
     msg.includes('rate limit') ||
     msg.includes('429') ||
@@ -299,7 +307,7 @@ export function isTransientOperationError(error: any): boolean {
  * @param ms - The sleep duration.
  */
 export async function sleep(ms: number): Promise<void> {
-  if ((global as any).__TEST__ || process.env.NODE_ENV === 'test') {
+  if ((global as { __TEST__?: boolean }).__TEST__ || process.env.NODE_ENV === 'test') {
     return;
   }
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -319,13 +327,13 @@ export enum PRIORITY {
 }
 
 class ShortTermCache {
-  private store = new Map<string, { value: any; expiresAt: number }>();
+  private store = new Map<string, { value: unknown; expiresAt: number }>();
 
-  set(key: string, value: any, ttlMs: number = 5000): void {
+  set(key: string, value: unknown, ttlMs: number = 5000): void {
     this.store.set(key, { value, expiresAt: Date.now() + ttlMs });
   }
 
-  get(key: string): any | null {
+  get(key: string): unknown | null {
     const entry = this.store.get(key);
     if (!entry) return null;
     if (Date.now() > entry.expiresAt) {
@@ -407,11 +415,11 @@ const keepAliveAgent = new https.Agent({
   maxFreeSockets: 10,
 });
 let fetchTransportOptionName = 'agent';
-let fetchTransportOptionValue: any = keepAliveAgent;
+let fetchTransportOptionValue: unknown = keepAliveAgent;
 try {
-  const { Agent } = require('undici');
+  const undici = require('undici') as { Agent: new (options: Record<string, unknown>) => unknown };
   fetchTransportOptionName = 'dispatcher';
-  fetchTransportOptionValue = new Agent({
+  fetchTransportOptionValue = new undici.Agent({
     keepAliveTimeout: 30_000,
     keepAliveMaxTimeout: 30_000,
     connections: 25,
@@ -429,21 +437,23 @@ let _rpcIndex = 0;
  * @param options - Call options.
  * @returns The result of the RPC call.
  */
-export async function rpcCall(
+export async function rpcCall<TMethod extends keyof SolanaRpcApi>(
   ctx: Context,
-  method: string,
-  params: any[] = [],
+  method: TMethod,
+  params: Parameters<SolanaRpcApi[TMethod]> | [] = [] as unknown as Parameters<
+    SolanaRpcApi[TMethod]
+  >,
   options: { priority?: PRIORITY; maxAttempts?: number; cacheTtlMs?: number } = {}
-): Promise<any> {
+): Promise<ReturnType<SolanaRpcApi[TMethod]>> {
   const priority = options.priority ?? PRIORITY.MEDIUM;
   const maxAttempts = options.maxAttempts ?? 3;
   const cacheTtlMs = options.cacheTtlMs ?? 0;
-  let lastError: any = null;
+  let lastError: unknown = null;
 
-  const cacheKey = cacheTtlMs > 0 ? `${method}:${JSON.stringify(params)}` : null;
+  const cacheKey = cacheTtlMs > 0 ? `${String(method)}:${JSON.stringify(params)}` : null;
   if (cacheKey) {
     const cached = rpcCache.get(cacheKey);
-    if (cached !== null) return cached;
+    if (cached !== null) return cached as ReturnType<SolanaRpcApi[TMethod]>;
   }
 
   const rpcPool = Array.isArray(ctx.rpcs) && ctx.rpcs.length > 0 ? ctx.rpcs : [ctx.rpc];
@@ -470,18 +480,21 @@ export async function rpcCall(
     _rpcIndex++;
 
     try {
-      if (method === 'sendTransaction') {
+      if (method === ('sendTransaction' as keyof SolanaRpcApi)) {
         await acquireSendTxToken(PRIORITY.ULTRA_HIGH);
       }
       await acquireRpcToken(priority);
 
-      const result = await rpc[method](...params).send();
+      const rpcMethod = rpc[method] as (...args: unknown[]) => {
+        send: () => Promise<ReturnType<SolanaRpcApi[TMethod]>>;
+      };
+      const result = await rpcMethod(...(params as unknown[])).send();
 
       rpcHealth.set(index, { errorCount: 0, lastErrorAt: 0 });
 
       if (cacheKey) rpcCache.set(cacheKey, result, cacheTtlMs);
-      return result;
-    } catch (e: any) {
+      return result as ReturnType<SolanaRpcApi[TMethod]>;
+    } catch (e: unknown) {
       lastError = e;
 
       const health = rpcHealth.get(index) || { errorCount: 0, lastErrorAt: 0 };
@@ -507,7 +520,7 @@ export async function rpcCall(
  * @param options - Fetch options.
  * @returns The parsed JSON data.
  */
-export async function fetchJson(
+export async function fetchJson<T = unknown>(
   url: string,
   options: {
     timeoutMs?: number;
@@ -515,44 +528,53 @@ export async function fetchJson(
     retryDelayMs?: number;
     method?: string;
     headers?: Record<string, string>;
-    body?: any;
+    body?: unknown;
   } = {}
-): Promise<any> {
+): Promise<T> {
   const timeoutMs = options.timeoutMs || 15000;
   const retries = options.retries ?? 2;
   const retryDelayMs = options.retryDelayMs ?? 750;
   const headers = { Accept: 'application/json', ...(options.headers || {}) };
 
-  let lastError: any = null;
+  let lastError: unknown = null;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(url, {
+      const fetchOptions: RequestInit & { [key: string]: unknown } = {
         method: options.method || 'GET',
         headers,
         body: options.body ? JSON.stringify(options.body) : undefined,
         signal: controller.signal,
-        [fetchTransportOptionName as any]: fetchTransportOptionValue,
-      } as any);
+      };
+      if (fetchTransportOptionName) {
+        fetchOptions[fetchTransportOptionName] = fetchTransportOptionValue;
+      }
+
+      const response = await fetch(url, fetchOptions);
       const text = await response.text();
-      let data: any = null;
+      let data: T | null = null;
       if (text) {
         try {
-          data = JSON.parse(text);
-        } catch (e: any) {
-          throw new Error(`Failed to parse JSON from ${url}: ${e.message}`);
+          data = JSON.parse(text) as T;
+        } catch (e: unknown) {
+          throw new Error(
+            `Failed to parse JSON from ${url}: ${e instanceof Error ? e.message : String(e)}`,
+            {
+              cause: e,
+            }
+          );
         }
       }
       if (!response.ok) {
         const details = data ? JSON.stringify(data) : text;
         throw new Error(`HTTP ${response.status} for ${url}: ${details}`);
       }
-      return data;
-    } catch (error: any) {
+      return data as T;
+    } catch (error: unknown) {
       lastError = error;
       if (attempt >= retries || !isTransientFetchError(error)) {
-        throw new Error(formatFetchError(url, error, timeoutMs));
+        throw new Error(formatFetchError(url, error, timeoutMs), { cause: error });
       }
       await sleep(retryDelayMs * (attempt + 1));
     } finally {
@@ -560,16 +582,20 @@ export async function fetchJson(
     }
   }
   throw new Error(
-    formatFetchError(url, lastError || new Error('Unknown fetch failure'), timeoutMs)
+    formatFetchError(url, lastError || new Error('Unknown fetch failure'), timeoutMs),
+    { cause: lastError }
   );
 }
 
-function isAbortError(error: any): boolean {
-  return error?.name === 'AbortError' || /aborted/i.test(String(error?.message || ''));
+function isAbortError(error: unknown): boolean {
+  return (
+    (error as { name?: string })?.name === 'AbortError' ||
+    /aborted/i.test(String((error as { message?: string })?.message || ''))
+  );
 }
 
-function isTransientFetchError(error: any): boolean {
-  const message = String(error?.message || '');
+function isTransientFetchError(error: unknown): boolean {
+  const message = String((error as { message?: string })?.message || '');
   return (
     isAbortError(error) ||
     /fetch failed/i.test(message) ||
@@ -578,13 +604,14 @@ function isTransientFetchError(error: any): boolean {
   );
 }
 
-function formatFetchError(url: string, error: any, timeoutMs: number): string {
+function formatFetchError(url: string, error: unknown, timeoutMs: number): string {
   if (isAbortError(error)) return `Request timed out after ${timeoutMs}ms for ${url}`;
-  if (String(error?.message || '').includes(url)) return error.message;
-  return `Request failed for ${url}: ${error.message}`;
+  const message = String((error as { message?: string })?.message || '');
+  if (message.includes(url)) return message;
+  return `Request failed for ${url}: ${message}`;
 }
 
-export function normalizeConcurrency(value: any, fallback: number = 1): number {
+export function normalizeConcurrency(value: unknown, fallback: number = 1): number {
   const numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric < 1) return fallback;
   return Math.max(1, Math.floor(numeric));
@@ -646,12 +673,12 @@ export function decodeRaydiumPool(buffer: Buffer): {
   };
 }
 
-export interface TaskRecord<T = any> {
+export interface TaskRecord<T = unknown> {
   index: number;
   item: T;
   status: 'fulfilled' | 'rejected';
-  value?: any;
-  reason?: any;
+  value?: unknown;
+  reason?: unknown;
   durationMs: number;
 }
 
@@ -662,9 +689,9 @@ export interface TaskRecord<T = any> {
  * @param options - Execution options.
  * @returns Array of task results.
  */
-export async function runBoundedPool<T = any>(
+export async function runBoundedPool<T = unknown>(
   items: T[],
-  worker: (item: T, index: number) => Promise<any>,
+  worker: (item: T, index: number) => Promise<unknown>,
   options: {
     concurrency?: number;
     timeoutMs?: number;
@@ -736,7 +763,7 @@ export async function runBoundedPool<T = any>(
  */
 export async function sendNotification(ctx: Context, message: string): Promise<void> {
   const { telegramBotToken, telegramChatId, discordWebhookUrl } = ctx.config;
-  const promises: Promise<any>[] = [];
+  const promises: Promise<unknown>[] = [];
 
   if (telegramBotToken && telegramChatId) {
     const url = `https://api.telegram.org/bot${telegramBotToken}/sendMessage`;
@@ -745,7 +772,7 @@ export async function sendNotification(ctx: Context, message: string): Promise<v
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: { chat_id: telegramChatId, text: message, parse_mode: 'HTML' },
-      }).catch((err) => console.error(`[NOTIFY ERROR] Telegram failed: ${err.message}`))
+      }).catch((err: Error) => console.error(`[NOTIFY ERROR] Telegram failed: ${err.message}`))
     );
   }
 
@@ -755,7 +782,7 @@ export async function sendNotification(ctx: Context, message: string): Promise<v
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: { content: message },
-      }).catch((err) => console.error(`[NOTIFY ERROR] Discord failed: ${err.message}`))
+      }).catch((err: Error) => console.error(`[NOTIFY ERROR] Discord failed: ${err.message}`))
     );
   }
 
@@ -764,7 +791,7 @@ export async function sendNotification(ctx: Context, message: string): Promise<v
   }
 }
 
-export function journalPaperTrade(ctx: Context, entry: any): void {
+export function journalPaperTrade(ctx: Context, entry: Record<string, unknown>): void {
   if (!ctx.config.paperTrading || !ctx.config.paperTradeJournalFile) {
     return;
   }
@@ -775,7 +802,7 @@ export function journalPaperTrade(ctx: Context, entry: any): void {
   appendFileLine(ctx.config.paperTradeJournalFile, line);
 }
 
-export function journalClosedTrade(ctx: Context, trade: any): void {
+export function journalClosedTrade(ctx: Context, trade: Record<string, unknown>): void {
   if (!ctx.config.tradeJournalFile) {
     return;
   }

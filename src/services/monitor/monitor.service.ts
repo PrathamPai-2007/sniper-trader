@@ -22,7 +22,7 @@ import {
 } from '../../core/config.js';
 import * as trading from '../trading/trading.service.js';
 import * as audit from '../audit/audit.service.js';
-import { Context, Position, WalletBalance } from '../../types/index.js';
+import { Context, Position, WalletBalance, ClosedTrade } from '../../types/index.js';
 
 const TP_PROFILE_DEFAULTS = {
   high: {
@@ -185,10 +185,10 @@ export function buildExitAccounting(
   proceeds: number
 ): { realizedPnlUsd: number; remainingCostUsd: number } {
   const ratio = bigintRatioToNumber(sellRaw, balRaw);
-  const costSold = Number((pos as any).remainingCostUsd || 0) * ratio;
+  const costSold = Number(pos.remainingCostUsd || 0) * ratio;
   return {
     realizedPnlUsd: proceeds - costSold,
-    remainingCostUsd: Math.max(0, Number((pos as any).remainingCostUsd || 0) - costSold),
+    remainingCostUsd: Math.max(0, Number(pos.remainingCostUsd || 0) - costSold),
   };
 }
 
@@ -312,7 +312,7 @@ export function recordTradeResult(ctx: Context, isWin: boolean): void {
 
 export function recordClosedTrade(ctx: Context, pos: Position, reason: string): void {
   const openedAtMs = new Date(pos.openedAt || Date.now()).getTime();
-  const trade = {
+  const trade: ClosedTrade = {
     mint: pos.mint,
     symbol: pos.symbol,
     exitReason: reason,
@@ -336,7 +336,7 @@ export function recordClosedTrade(ctx: Context, pos: Position, reason: string): 
     initialBuyAmountSol: pos.initialBuyAmountSol || null,
   };
   ctx.store.addClosedTrade(trade);
-  journalClosedTrade(ctx, trade);
+  journalClosedTrade(ctx, trade as unknown as Record<string, unknown>);
 }
 
 function getTrailingActivationMultiple(pos: Position): number {
@@ -354,6 +354,13 @@ export function startCoolDown(ctx: Context, mint: string, pUsd: number): void {
   ctx.store.startCoolDown(mint, pUsd, expires);
 }
 
+export interface PriceRecord {
+  usdPrice?: number;
+  liquidity?: number;
+  bidPrice?: number;
+  askPrice?: number;
+}
+
 export async function monitorPositions(
   ctx: Context,
   fetchPricesBestEffort: (
@@ -361,7 +368,7 @@ export async function monitorPositions(
     mints: string[],
     label: string,
     apiKey?: string
-  ) => Promise<Record<string, any>>
+  ) => Promise<Record<string, PriceRecord>>
 ): Promise<void> {
   if (ctx.state.positions.size === 0) return;
   const mints = Array.from(ctx.state.positions.keys());
@@ -381,9 +388,10 @@ export async function monitorPositions(
         Array.isArray(pos.takeProfitMultiples) && pos.takeProfitMultiples.length > 0
           ? pos.takeProfitMultiples
           : TAKE_PROFIT_MULTIPLES;
-      let balance = await trading.getWalletTokenBalance(ctx, mint);
+      const balance = await trading.getWalletTokenBalance(ctx, mint);
       if (balance.rawAmount <= 0n) {
         ctx.logger(`Position ${pos.symbol} zero balance; removing.`, 'warn');
+
         ctx.store.removePosition(mint);
         return;
       }
@@ -435,7 +443,13 @@ export async function monitorPositions(
 
       pos.priceHistory = pos.priceHistory || [];
       pos.priceHistory.push({ price: pUsd, timestamp: Date.now() });
-      if (pRecord?.bidPrice > 0 && pRecord?.askPrice > 0) {
+      if (
+        pRecord &&
+        pRecord.bidPrice !== undefined &&
+        pRecord.askPrice !== undefined &&
+        pRecord.bidPrice > 0 &&
+        pRecord.askPrice > 0
+      ) {
         pos.spreadHistory = pos.spreadHistory || [];
         pos.spreadHistory.push({
           spread: computeSpread(pRecord.bidPrice, pRecord.askPrice),
@@ -443,9 +457,9 @@ export async function monitorPositions(
         });
       }
       const cutoff = Date.now() - 60000;
-      pos.priceHistory = pos.priceHistory.filter((h: any) => h.timestamp > cutoff);
+      pos.priceHistory = pos.priceHistory.filter((h) => h.timestamp > cutoff);
       if (pos.spreadHistory) {
-        pos.spreadHistory = pos.spreadHistory.filter((h: any) => h.timestamp > cutoff);
+        pos.spreadHistory = pos.spreadHistory.filter((h) => h.timestamp > cutoff);
       }
 
       ctx.store.upsertPosition(pos);
@@ -523,8 +537,9 @@ export async function monitorPositions(
               }
             }
           }
-        } catch (err: any) {
-          ctx.logger(`Re-audit failed for ${pos.symbol}: ${err.message}`, 'debug');
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          ctx.logger(`Re-audit failed for ${pos.symbol}: ${msg}`, 'debug');
         }
       }
 
@@ -566,8 +581,8 @@ export async function monitorPositions(
         const buyCollapse =
           Array.isArray(pos.tapeHistory) &&
           pos.tapeHistory.length >= 2 &&
-          pos.tapeHistory[pos.tapeHistory.length - 1]!.buys -
-            pos.tapeHistory[pos.tapeHistory.length - 2]!.buys ===
+          (pos.tapeHistory[pos.tapeHistory.length - 1]?.buys ?? 0) -
+            (pos.tapeHistory[pos.tapeHistory.length - 2]?.buys ?? 0) ===
             0;
         if (drop > ctx.config.earlyPerformanceDropPct / 100 || buyCollapse) {
           ctx.logger(
@@ -735,7 +750,6 @@ export async function monitorPositions(
         if (pUsd < targetP) break;
         const freshBalance = await trading.getWalletTokenBalance(ctx, pos.mint);
         if (!(await sellTakeProfit(ctx, pos, freshBalance, pUsd, nextM))) break;
-        balance = freshBalance;
         pos.minTpReached = false;
         pos.minTpFirstReachedAt = null;
         pos.minTpArmed = false;
@@ -748,7 +762,12 @@ export async function monitorPositions(
 
 export async function closeAllOpenPositions(
   ctx: Context,
-  fetchPricesBestEffort: any,
+  fetchPricesBestEffort: (
+    ctx: Context,
+    mints: string[],
+    label: string,
+    apiKey?: string
+  ) => Promise<Record<string, PriceRecord>>,
   reason = 'shutdown-exit'
 ): Promise<void> {
   const mints = Array.from(ctx.state.positions.keys());
@@ -772,12 +791,11 @@ export async function closeAllOpenPositions(
         ctx.store.removePosition(mint);
         continue;
       }
-      const p = Number(
-        prices[mint]?.usdPrice || (pos as any).lastKnownPriceUsd || pos.entryPriceUsd || 0
-      );
+      const p = Number(prices[mint]?.usdPrice || pos.lastKnownPriceUsd || pos.entryPriceUsd || 0);
       await executePositionExit(ctx, pos, bal, p, bal.rawAmount, reason);
-    } catch (e: any) {
-      ctx.logger(`Failed to close ${pos.symbol || mint}: ${e.message}`, 'error', { console: true });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      ctx.logger(`Failed to close ${pos.symbol || mint}: ${msg}`, 'error', { console: true });
     }
   }
 }

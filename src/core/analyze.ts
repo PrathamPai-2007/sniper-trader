@@ -2,6 +2,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { StateMetrics } from '../types/index.js';
 
 /**
  * Interface for the reconstructed trade used in analysis.
@@ -13,7 +14,7 @@ export interface AnalyzerTrade {
   entryPriceUsd: number;
   entryUsdValue: number;
   entryScore: number;
-  tpProfile: any;
+  tpProfile: string | null;
   takeProfitMultiples: number[] | null;
   takeProfitFractions: number[] | null;
   trailingStopDrawdownPctResolved: number;
@@ -29,7 +30,7 @@ export interface AnalyzerTrade {
   events: Array<{
     event: string;
     priceUsd: number;
-    tokenAmount: any;
+    tokenAmount: string | number | null;
     proceedsUsd: number;
     realizedPnlUsd: number;
     reason: string | null;
@@ -94,15 +95,15 @@ function findSessionDirs(baseDir: string): string[] {
     .map((d) => path.join(logsDir, d));
 }
 
-function readJson(filePath: string): any | null {
+function readJson<T = unknown>(filePath: string): T | null {
   try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return JSON.parse(fs.readFileSync(filePath, 'utf8')) as T;
   } catch {
     return null;
   }
 }
 
-function readJsonl(filePath: string): any[] {
+function readJsonl<T = unknown>(filePath: string): T[] {
   try {
     const content = fs.readFileSync(filePath, 'utf8').trim();
     if (!content) return [];
@@ -110,40 +111,53 @@ function readJsonl(filePath: string): any[] {
       .split('\n')
       .map((line) => {
         try {
-          return JSON.parse(line);
+          return JSON.parse(line) as T;
         } catch {
           return null;
         }
       })
-      .filter(Boolean);
+      .filter((v): v is T => v !== null);
   } catch {
     return [];
   }
 }
 
-export function ingestSessions(baseDir: string): { trades: AnalyzerTrade[]; metrics: any[] } {
+interface MetricEntry extends Partial<StateMetrics> {
+  sessionDir: string;
+}
+
+export function ingestSessions(baseDir: string): {
+  trades: AnalyzerTrade[];
+  metrics: MetricEntry[];
+} {
   const sessions = findSessionDirs(baseDir);
   const allTrades: AnalyzerTrade[] = [];
-  const allMetrics: any[] = [];
+  const allMetrics: MetricEntry[] = [];
 
   for (const sessionDir of sessions) {
-    const journal = readJsonl(path.join(sessionDir, 'paper-trade-journal.jsonl'));
-    const journalOld = readJsonl(path.join(sessionDir, 'paper-trade-journal.json'));
-    const tradeHistory = readJsonl(path.join(sessionDir, 'trade-journal.jsonl'));
-    const metrics = readJson(path.join(sessionDir, 'metrics.json'));
+    const journal = readJsonl<{ mint?: string; event?: string; [key: string]: unknown }>(
+      path.join(sessionDir, 'paper-trade-journal.jsonl')
+    );
+    const journalOld = readJsonl<{ mint?: string; event?: string; [key: string]: unknown }>(
+      path.join(sessionDir, 'paper-trade-journal.json')
+    );
+    const tradeHistory = readJsonl<{ mint?: string; [key: string]: unknown }>(
+      path.join(sessionDir, 'trade-journal.jsonl')
+    );
+    const metrics = readJson<StateMetrics>(path.join(sessionDir, 'metrics.json'));
 
     if (metrics) {
       allMetrics.push({ sessionDir: path.basename(sessionDir), ...metrics });
     }
 
-    const eventsByMint = new Map<string, any[]>();
+    const eventsByMint = new Map<string, Array<{ [key: string]: unknown }>>();
     for (const ev of [...journal, ...journalOld]) {
       if (!ev.mint) continue;
       if (!eventsByMint.has(ev.mint)) eventsByMint.set(ev.mint, []);
       eventsByMint.get(ev.mint)!.push(ev);
     }
 
-    const tradeByMint = new Map<string, any>();
+    const tradeByMint = new Map<string, { [key: string]: unknown }>();
     for (const t of tradeHistory) {
       if (t.mint) tradeByMint.set(t.mint, t);
     }
@@ -158,43 +172,44 @@ export function ingestSessions(baseDir: string): { trades: AnalyzerTrade[]; metr
       const trade: AnalyzerTrade = {
         sessionDir: path.basename(sessionDir),
         mint: mint,
-        symbol: buyEvent.symbol || tradeMeta.symbol || 'UNKNOWN',
+        symbol: (buyEvent.symbol as string) || (tradeMeta.symbol as string) || 'UNKNOWN',
         entryPriceUsd: Number(buyEvent.priceUsd || tradeMeta.entryPriceUsd || 0),
         entryUsdValue: Number(tradeMeta.entryUsdValue || 0),
         entryScore: Number(tradeMeta.entryScore || 0),
-        tpProfile: tradeMeta.tpProfile || null,
-        takeProfitMultiples: tradeMeta.takeProfitMultiples || null,
-        takeProfitFractions: tradeMeta.takeProfitFractions || null,
+        tpProfile: (tradeMeta.tpProfile as string) || null,
+        takeProfitMultiples: (tradeMeta.takeProfitMultiples as number[]) || null,
+        takeProfitFractions: (tradeMeta.takeProfitFractions as number[]) || null,
         trailingStopDrawdownPctResolved: Number(tradeMeta.trailingStopDrawdownPctResolved || 0.2),
         maxHoldMinutesResolved: Number(tradeMeta.maxHoldMinutesResolved || 20),
         volatilityScaler: Number(tradeMeta.volatilityScaler || 0),
         entryLiquidityUsd: Number(tradeMeta.entryLiquidityUsd || 0),
-        launchpad: tradeMeta.launchpad || null,
+        launchpad: (tradeMeta.launchpad as string) || null,
         targetsHit: Number(tradeMeta.targetsHit || 0),
-        initialBuyAmountSol: tradeMeta.initialBuyAmountSol || null,
+        initialBuyAmountSol: (tradeMeta.initialBuyAmountSol as number) || null,
         highestPriceUsd: Number(tradeMeta.highestPriceUsd || buyEvent.priceUsd || 0),
-        openedAt: buyEvent.timestamp || tradeMeta.openedAt || null,
-        closedAt: closeEvent?.timestamp || tradeMeta.closedAt || null,
+        openedAt: (buyEvent.timestamp as string) || (tradeMeta.openedAt as string) || null,
+        closedAt: (closeEvent?.timestamp as string) || (tradeMeta.closedAt as string) || null,
         events: events.map((e) => ({
-          event: e.event,
+          event: e.event as string,
           priceUsd: Number(e.priceUsd || 0),
-          tokenAmount: e.tokenAmount,
+          tokenAmount: (e.tokenAmount as string | number) || null,
           proceedsUsd: Number(e.proceedsUsd || 0),
           realizedPnlUsd: Number(e.realizedPnlUsd || 0),
-          reason: e.reason || null,
-          timestamp: e.timestamp,
+          reason: (e.reason as string) || null,
+          timestamp: e.timestamp as string,
         })),
         totalRealizedPnlUsd: Number(tradeMeta.realizedPnlUsd || closeEvent?.realizedPnlUsd || 0),
         totalProceedsUsd: Number(tradeMeta.realizedProceedsUsd || closeEvent?.proceedsUsd || 0),
-        actualExitReason: closeEvent?.reason || tradeMeta.exitReason || null,
+        actualExitReason:
+          (closeEvent?.reason as string) || (tradeMeta.exitReason as string) || null,
         actualExitPrice: Number(closeEvent?.priceUsd || 0),
         holdSeconds: tradeMeta.holdSeconds
           ? Number(tradeMeta.holdSeconds)
           : closeEvent?.timestamp && buyEvent.timestamp
             ? Math.max(
                 0,
-                (new Date(closeEvent.timestamp).getTime() -
-                  new Date(buyEvent.timestamp).getTime()) /
+                (new Date(closeEvent.timestamp as string).getTime() -
+                  new Date(buyEvent.timestamp as string).getTime()) /
                   1000
               )
             : 0,
@@ -342,7 +357,6 @@ export function replayTrade(trade: AnalyzerTrade, params: ReplayParams): ReplayR
     const ageMin = t / 60;
     if (ageMin >= maxHoldMin && p < entryP * timeExitMinMultiple && remainingTokens > 0.001) {
       totalProceeds += originalCost * remainingTokens * (p / entryP);
-      remainingTokens = 0;
       exitReason = 'time-exit';
       exitTime = t;
       break;
@@ -353,7 +367,6 @@ export function replayTrade(trade: AnalyzerTrade, params: ReplayParams): ReplayR
     const finalPoint = pricePath[pricePath.length - 1];
     const finalExitP = finalPoint ? finalPoint.price : entryP;
     totalProceeds += originalCost * remainingTokens * (finalExitP / entryP);
-    remainingTokens = 0;
     if (exitReason === 'none') exitReason = 'end-of-simulation';
   }
 
@@ -374,7 +387,7 @@ export function replayTrade(trade: AnalyzerTrade, params: ReplayParams): ReplayR
 // 4. Parameter grid
 // ---------------------------------------------------------------------------
 
-export const PARAM_GRID: Record<string, any[]> = {
+export const PARAM_GRID: Record<keyof ReplayParams, unknown[]> = {
   stopLossPct: [0.1, 0.15, 0.2, 0.25],
   trailingDrawdownPct: [0.1, 0.15, 0.2, 0.25],
   takeProfitMultiples: [[1.5], [1.3, 2.0], [1.5, 2.5]],
@@ -385,19 +398,19 @@ export const PARAM_GRID: Record<string, any[]> = {
 };
 
 export function generateGrid(): ReplayParams[] {
-  const keys = Object.keys(PARAM_GRID);
+  const keys = Object.keys(PARAM_GRID) as Array<keyof ReplayParams>;
   const values = keys.map((k) => PARAM_GRID[k]);
 
   function* cartesian(
-    arrs: any[][],
+    arrs: unknown[][],
     idx: number = 0,
-    current: any[] = []
+    current: unknown[] = []
   ): Generator<ReplayParams> {
     if (idx === arrs.length) {
-      const params: any = {};
+      const params: Partial<ReplayParams> = {};
       for (let i = 0; i < keys.length; i++) {
         const key = keys[i];
-        if (key) params[key] = current[i];
+        if (key) (params as Record<keyof ReplayParams, unknown>)[key] = current[i];
       }
       yield params as ReplayParams;
       return;
@@ -410,7 +423,7 @@ export function generateGrid(): ReplayParams[] {
     }
   }
 
-  return [...cartesian(values as any[][])];
+  return [...cartesian(values as unknown[][])];
 }
 
 function stringifyParams(p: ReplayParams): string {
@@ -431,8 +444,8 @@ function stringifyParams(p: ReplayParams): string {
 
 export function runAnalysis(
   trades: AnalyzerTrade[],
-  metrics: any[]
-): { results: AnalysisResult[]; trades: AnalyzerTrade[]; metrics: any[] } {
+  metrics: MetricEntry[]
+): { results: AnalysisResult[]; trades: AnalyzerTrade[]; metrics: MetricEntry[] } {
   const grid = generateGrid();
   const totalCombos = grid.length;
 
@@ -500,7 +513,7 @@ export function runAnalysis(
 // 6. Output
 // ---------------------------------------------------------------------------
 
-function pad(str: any, len: number): string {
+function pad(str: unknown, len: number): string {
   const s = String(str);
   return s.length >= len ? s : s + ' '.repeat(len - s.length);
 }
@@ -564,15 +577,15 @@ function printTopCombos(results: AnalysisResult[], topN: number = 15): void {
 function printSensitivity(results: AnalysisResult[]): void {
   console.log(`\n--- Per-Parameter Sensitivity ---`);
 
-  const paramKeys = Object.keys(PARAM_GRID);
+  const paramKeys = Object.keys(PARAM_GRID) as Array<keyof ReplayParams>;
 
   for (const key of paramKeys) {
     const grouped = new Map<string, { pnl: number; count: number }>();
 
     for (const r of results) {
-      const valKey = Array.isArray((r.params as any)[key])
-        ? '[' + (r.params as any)[key].join(',') + ']'
-        : String((r.params as any)[key]);
+      const valKey = Array.isArray(r.params[key])
+        ? '[' + (r.params[key] as unknown[]).join(',') + ']'
+        : String(r.params[key]);
       if (!grouped.has(valKey)) grouped.set(valKey, { pnl: 0, count: 0 });
       const g = grouped.get(valKey)!;
       g.pnl += r.totalPnl;
@@ -580,7 +593,7 @@ function printSensitivity(results: AnalysisResult[]): void {
     }
 
     const sorted = [...grouped.entries()].sort((a, b) => b[1].pnl - a[1].pnl);
-    const label = key.replace(/([A-Z])/g, ' $1').replace(/^./, (s) => s.toUpperCase());
+    const label = (key as string).replace(/([A-Z])/g, ' $1').replace(/^./, (s) => s.toUpperCase());
 
     console.log(`\n  ${label}:`);
     for (const [val, agg] of sorted) {
@@ -590,7 +603,7 @@ function printSensitivity(results: AnalysisResult[]): void {
   }
 }
 
-function printFunnel(metrics: any[]): void {
+function printFunnel(metrics: MetricEntry[]): void {
   if (metrics.length === 0) return;
 
   console.log(`\n--- Rejection Funnel (across ${metrics.length} sessions) ---`);
@@ -686,14 +699,14 @@ export async function main(): Promise<void> {
   console.log(`\nFull results written to ${outputFile}`);
 }
 
-function computeSensitivitySummary(results: AnalysisResult[]): Record<string, any[]> {
-  const summary: Record<string, any[]> = {};
-  for (const key of Object.keys(PARAM_GRID)) {
+function computeSensitivitySummary(results: AnalysisResult[]): Record<string, unknown[]> {
+  const summary: Record<string, unknown[]> = {};
+  for (const key of Object.keys(PARAM_GRID) as Array<keyof ReplayParams>) {
     const grouped = new Map<string, { pnl: number; count: number }>();
     for (const r of results) {
-      const valKey = Array.isArray((r.params as any)[key])
-        ? '[' + (r.params as any)[key].join(',') + ']'
-        : String((r.params as any)[key]);
+      const valKey = Array.isArray(r.params[key])
+        ? '[' + (r.params[key] as unknown[]).join(',') + ']'
+        : String(r.params[key]);
       if (!grouped.has(valKey)) grouped.set(valKey, { pnl: 0, count: 0 });
       const g = grouped.get(valKey)!;
       g.pnl += r.totalPnl;

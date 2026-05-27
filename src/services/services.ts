@@ -13,6 +13,7 @@ import {
   decodePumpCurve,
   PRIORITY,
 } from '../core/utils.js';
+import fs from 'node:fs';
 import { PUMP_FUN_PROGRAM_ID, SOL_MINT } from '../core/config.js';
 import { address, getProgramDerivedAddress, getAddressEncoder } from '@solana/addresses';
 import * as engine from './engine/engine.service.js';
@@ -43,11 +44,11 @@ function resolveBuyAmountLamports(config: Config): string {
  */
 export async function fetchRecentLaunches(ctx: Context): Promise<TokenMetadata[]> {
   const url = `${ctx.config.jupiterBaseUrl}/tokens/v2/recent`;
-  const data = await fetchJson(url, {
+  const data = (await fetchJson(url, {
     headers: { 'x-api-key': ctx.config.jupiterApiKey },
     timeoutMs: 8000,
     retries: 1,
-  });
+  })) as TokenMetadata[];
   if (!Array.isArray(data)) throw new Error('Unexpected Jupiter recent response shape.');
   return data;
 }
@@ -61,7 +62,7 @@ export async function fetchDirectMarketData(
   ctx: Context,
   mint: string,
   launchpadName: string | null = null
-): Promise<any | null> {
+): Promise<{ usdPrice: number; liquidity: number; isCompleted: boolean; source: string } | null> {
   const launchpad = engine.getLaunchpadProfile(
     launchpadName || ctx.state.marketSnapshots.get(mint)?.launchpad || 'pump.fun'
   );
@@ -75,7 +76,7 @@ export async function fetchDirectMarketData(
       seeds: [Buffer.from(PUMP_FUN_CURVE_SEED, 'utf8'), getAddressEncoder().encode(mintAddress)],
     });
 
-    const account = await rpcCall(
+    const account = (await rpcCall(
       ctx,
       'getAccountInfo',
       [
@@ -83,13 +84,15 @@ export async function fetchDirectMarketData(
         {
           encoding: 'base64',
           commitment: 'confirmed',
-        },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
       ],
       { priority: PRIORITY.MEDIUM, cacheTtlMs: 5000 }
-    );
+    )) as { value: { data: string[] } | null };
 
-    if (!account.value?.data?.[0]) return null;
-    const curve = decodePumpCurve(Buffer.from(account.value.data[0], 'base64'));
+    const data = account.value?.data;
+    if (!data || !Array.isArray(data) || !data[0]) return null;
+    const curve = decodePumpCurve(Buffer.from(data[0], 'base64'));
     if (!curve) return null;
 
     const solPrice = await trading.estimateSolUsdValue(ctx, 1000000000n);
@@ -106,8 +109,11 @@ export async function fetchDirectMarketData(
       isCompleted: curve.isCompleted,
       source: 'rpc-direct',
     };
-  } catch (e: any) {
-    ctx.logger(`Direct RPC market data fetch failed for ${mint}: ${e.message}`, 'debug');
+  } catch (e: unknown) {
+    ctx.logger(
+      `Direct RPC market data fetch failed for ${mint}: ${e instanceof Error ? e.message : String(e)}`,
+      'debug'
+    );
     return null;
   }
 }
@@ -119,25 +125,28 @@ export async function fetchPrices(
   ctx: Context,
   mints: string[],
   apiKey: string | null = null
-): Promise<Record<string, any>> {
+): Promise<Record<string, { usdPrice: number; [key: string]: unknown }>> {
   if (mints.length === 0) return {};
   const url = `${ctx.config.jupiterBaseUrl}/price/v3?ids=${encodeURIComponent(mints.join(','))}`;
-  const response = await fetchJson(url, {
+  const response = (await fetchJson(url, {
     headers: { 'x-api-key': apiKey || ctx.config.jupiterApiKey },
     timeoutMs: 5000,
     retries: 1,
-  });
+  })) as { data?: Record<string, { usdPrice?: number; price?: number; [key: string]: unknown }> };
 
   if (!response || typeof response !== 'object') throw new Error('Invalid Jupiter price response.');
-  const priceMap = response.data ?? response;
+  const priceMap = (response.data ?? response) as Record<
+    string,
+    { usdPrice?: number; price?: number; [key: string]: unknown }
+  >;
   if (!priceMap || typeof priceMap !== 'object') return {};
 
-  const normalized: Record<string, any> = {};
+  const normalized: Record<string, { usdPrice: number; [key: string]: unknown }> = {};
   for (const [id, record] of Object.entries(priceMap)) {
     if (record) {
       normalized[id] = {
-        ...(record as any),
-        usdPrice: Number((record as any).usdPrice || (record as any).price || 0),
+        ...record,
+        usdPrice: Number(record.usdPrice || record.price || 0),
       };
     }
   }
@@ -152,7 +161,7 @@ export async function fetchPricesBestEffort(
   mints: string[],
   contextLabel = 'price refresh',
   apiKey: string | null = null
-): Promise<Record<string, any>> {
+): Promise<Record<string, { usdPrice: number; [key: string]: unknown }>> {
   if (mints.length === 0) return {};
   const startedAt = Date.now();
   const key = apiKey || ctx.config.jupiterApiKey;
@@ -161,8 +170,11 @@ export async function fetchPricesBestEffort(
     (async () => {
       try {
         return await fetchPrices(ctx, mints, key);
-      } catch (e: any) {
-        ctx.logger(`Batch ${contextLabel} API failed: ${e.message}.`, 'debug');
+      } catch (e: unknown) {
+        ctx.logger(
+          `Batch ${contextLabel} API failed: ${e instanceof Error ? e.message : String(e)}.`,
+          'debug'
+        );
         return {};
       }
     })(),
@@ -177,13 +189,14 @@ export async function fetchPricesBestEffort(
     ),
   ]);
 
-  const prices: Record<string, any> = { ...apiResult };
+  const prices: Record<string, { usdPrice: number; [key: string]: unknown }> = { ...apiResult };
 
   let directCount = 0;
   for (const result of onChainResults) {
     if (result.status === 'fulfilled' && result.value) {
       const mint = result.item;
-      const directData = result.value[mint];
+      const val = result.value as Record<string, { usdPrice: number; [key: string]: unknown }>;
+      const directData = val[mint];
       if (directData) {
         directCount++;
         if (prices[mint]) {
@@ -214,7 +227,10 @@ export async function fetchPricesBestEffort(
     );
     for (const result of fallbackResults) {
       if (result.status === 'fulfilled' && result.value) {
-        Object.assign(prices, result.value);
+        Object.assign(
+          prices,
+          result.value as Record<string, { usdPrice: number; [key: string]: unknown }>
+        );
       }
     }
   }
@@ -327,10 +343,14 @@ export async function buyCandidate(
       };
 
       const logDir = path.dirname(ctx.config.logFile);
-      const statsFilePath = path.join(logDir, 'stats.json');
-      atomicWriteFile(statsFilePath, safeJsonStringify(pos, 2)).catch((err: any) =>
-        ctx.logger(`Failed to save stats file at ${statsFilePath}: ${err.message}`, 'error')
-      );
+      const tradesFilePath = path.join(logDir, 'trades.jsonl');
+      fs.appendFile(tradesFilePath, safeJsonStringify(pos) + '\n', (err: unknown) => {
+        if (err)
+          ctx.logger(
+            `Failed to append to trades file at ${tradesFilePath}: ${err instanceof Error ? err.message : String(err)}`,
+            'error'
+          );
+      });
 
       ctx.store.upsertPosition(pos);
       journalPaperTrade(ctx, {
@@ -434,8 +454,11 @@ export async function buyCandidate(
 
     const logDir = path.dirname(ctx.config.logFile);
     const statsFilePath = path.join(logDir, 'stats.json');
-    atomicWriteFile(statsFilePath, safeJsonStringify(pos, 2)).catch((err: any) =>
-      ctx.logger(`Failed to save stats file at ${statsFilePath}: ${err.message}`, 'error')
+    atomicWriteFile(statsFilePath, safeJsonStringify(pos, 2)).catch((err: unknown) =>
+      ctx.logger(
+        `Failed to save stats file at ${statsFilePath}: ${err instanceof Error ? err.message : String(err)}`,
+        'error'
+      )
     );
     ctx.store.upsertPosition(pos);
     const msg = `🚀 <b>BUY: ${token.symbol}</b>\nScore: ${candidateScore}\nAmount: ${buySolText} SOL\nPrice: ${formatUsd(entryPriceUsd)}`;
@@ -445,9 +468,12 @@ export async function buyCandidate(
       'trade'
     );
     return pos;
-  } catch (e: any) {
+  } catch (e: unknown) {
     ctx.store.incrementMetric('buyFailures');
-    ctx.logger(`Buy failed for ${token.symbol || token.id}: ${e.message}`, 'error');
+    ctx.logger(
+      `Buy failed for ${token.symbol || token.id}: ${e instanceof Error ? e.message : String(e)}`,
+      'error'
+    );
     return null;
   }
 }
@@ -467,7 +493,7 @@ export async function monitorPositions(ctx: Context): Promise<void> {
 export async function closeAllOpenPositions(ctx: Context): Promise<void> {
   return monitor.closeAllOpenPositions(
     ctx,
-    (c: Context, m: string[], label: string, key: string | null) =>
+    (c: Context, m: string[], label: string, key?: string) =>
       fetchPricesBestEffort(c, m, label, key)
   );
 }
@@ -475,7 +501,10 @@ export async function closeAllOpenPositions(ctx: Context): Promise<void> {
 import { getMoodAdjustments as monitorGetMoodAdjustments } from './monitor/monitor.service.js';
 export const getMoodAdjustments = monitorGetMoodAdjustments;
 
-export function mergeLoopRequest(current: any, next: any): any {
+export function mergeLoopRequest(
+  current: Record<string, unknown> | null,
+  next: Record<string, unknown>
+): Record<string, unknown> {
   if (!current) return { ...next };
   return {
     ...current,
@@ -485,6 +514,8 @@ export function mergeLoopRequest(current: any, next: any): any {
     websocketSignalCount:
       Number(current.websocketSignalCount || 0) + Number(next.websocketSignalCount || 0),
     reason:
-      [current.reason, next.reason].filter(Boolean).join('+') || next.reason || current.reason,
+      [current.reason as string, next.reason as string].filter(Boolean).join('+') ||
+      (next.reason as string) ||
+      (current.reason as string),
   };
 }

@@ -1,3 +1,6 @@
+import { Rpc, SolanaRpcApi } from '@solana/rpc';
+import { RpcSubscriptions, SolanaRpcSubscriptionsApi } from '@solana/rpc-subscriptions';
+
 export interface LaunchpadProfile {
   scoreBonus: number;
   liquidityMultiplier: number;
@@ -146,7 +149,33 @@ export interface TokenMetadata {
   website?: string;
   twitter?: string;
   telegram?: string;
-  [key: string]: any;
+  isVerified?: boolean;
+  fdvUsd?: number;
+  marketCapUsd?: number;
+  priceUsd?: number;
+  organicScore?: number | string;
+  fdv?: number | string;
+  holderCount?: number | string;
+  stats5m?: {
+    numBuys: number;
+    numSells: number;
+  };
+  snapshotQuality?: string;
+  historicalSource?: string;
+  firstPool?: {
+    createdAt: string | number;
+  };
+  audit?: {
+    isSus?: boolean;
+    topHoldersPercentage?: number;
+  };
+  source?: string;
+  priceHistory?: { price: number; timestamp: number }[];
+  tapeAtStart?: { buys: number; sells: number };
+  tapeHistory?: { buys: number; sells: number; timestamp: number }[];
+  volume24h?: number;
+  buyPressure?: number;
+  sellPressure?: number;
 }
 
 export interface Position {
@@ -220,12 +249,11 @@ export interface MarketSnapshot {
   observedAt?: string;
   holderCount?: number;
   isVerified?: boolean;
-  [key: string]: any;
 }
 
 export interface RecheckItem {
   mint: string;
-  tokenSnapshot?: any;
+  tokenSnapshot?: TokenMetadata;
   attempts?: number;
   lastAttemptTime?: number;
   scheduledTime?: number;
@@ -282,7 +310,8 @@ export interface CoolDownEntry {
 
 export interface RetiredMintEntry {
   lastExitPriceUsd?: number;
-  [key: string]: any;
+  retiredAt: string;
+  reason?: string;
 }
 
 export interface ClosedTrade {
@@ -331,7 +360,7 @@ export interface StateStore {
   untrackMint(mint: string): void;
   upsertPosition(position: Position): void;
   removePosition(mint: string): void;
-  incrementMetric(key: string, amount?: number): void;
+  incrementMetric(key: keyof StateMetrics, amount?: number): void;
   recordRejection(code: string): void;
   updatePaperSolBalance(amountLamports: bigint | string): void;
   addClosedTrade(trade: ClosedTrade): void;
@@ -341,7 +370,7 @@ export interface StateStore {
   startCoolDown(mint: string, pUsd: number, expiresAt: number): void;
   updateMarketSnapshot(mint: string, snapshot: MarketSnapshot): void;
   calculateGMI(): number;
-  updateLaunchHistory(launches: any[]): void;
+  updateLaunchHistory(launches: TokenMetadata[]): void;
   upsertRecheckEntry(entry: RecheckItem): void;
   removeRecheckEntry(mint: string): void;
   removeCoolDown(mint: string): void;
@@ -366,14 +395,20 @@ export interface MintSignals {
   freezeAuthority: string | null;
   top1Share: number;
   top5Share: number;
-  topAccounts: any[];
+  topAccounts: Array<{
+    address: string;
+    rawAmount: bigint;
+    share: number;
+    owner: string | null;
+    ownerLookupError?: string;
+  }>;
 }
 
 export interface GoPlusTokenSignals {
   status: 'ok' | 'no_data' | 'timeout' | 'error';
   blockers: string[];
   notes: string[];
-  raw?: any;
+  raw?: unknown;
   error?: string;
 }
 
@@ -382,8 +417,17 @@ export interface BubbleMapsSignals {
   blockers: string[];
   score: number | null;
   largestClusterShare: number | null;
-  raw?: any;
+  raw?: unknown;
   error?: string;
+}
+
+export interface DiscoveryLoopTrigger {
+  reason?: string;
+  forceDiscovery?: boolean;
+  skipMonitor?: boolean;
+  websocketSignalCount?: number;
+  mints?: string[];
+  mintLaunchpads?: Record<string, string>;
 }
 
 export interface EvaluationResult {
@@ -404,16 +448,16 @@ export interface EvaluationResult {
 export interface Context {
   config: Config;
   state: State;
-  rpc: any; // Rpc<SolanaRpcApi>
-  rpcs: any[]; // Rpc<SolanaRpcApi>[]
-  rpcSubscriptions: any; // RpcSubscriptions<SolanaRpcSubscriptionsApi>
-  rpcSubscriptionPool: any[]; // RpcSubscriptions<SolanaRpcSubscriptionsApi>[]
-  wallet: { address: string; keypair?: any };
+  rpc: Rpc<SolanaRpcApi>;
+  rpcs: Rpc<SolanaRpcApi>[];
+  rpcSubscriptions: RpcSubscriptions<SolanaRpcSubscriptionsApi>;
+  rpcSubscriptionPool: RpcSubscriptions<SolanaRpcSubscriptionsApi>[];
+  wallet: { address: string; keypair?: unknown };
   logger: (message: string, level?: string, options?: { console?: boolean }) => void;
   persistState: (options?: { sync?: boolean; force?: boolean }) => Promise<void>;
   calculateGMI: () => number;
   store: StateStore;
-  recordScanBackpressureEvent?: (error: any) => void;
+  recordScanBackpressureEvent?: (error: unknown) => void;
   getEffectiveParallelism?: (base: number) => number;
   scanBackpressureFactor?: number;
 }

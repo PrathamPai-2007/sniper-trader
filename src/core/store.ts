@@ -12,6 +12,8 @@ import {
   ClosedTrade,
   RetiredMintEntry,
   TokenMetadata,
+  LaunchHistoryEntry,
+  StateMetrics,
 } from '../types/index.js';
 
 /**
@@ -46,11 +48,11 @@ export class StateStore extends EventEmitter {
       positions: new Map<string, Position>(),
       marketSnapshots: new Map<string, MarketSnapshot>(),
       launchHistory: [],
-      paperSolBalanceLamports: this.config?.initialPaperSolLamports?.toString() || '1000000000',
+      paperSolBalanceLamports: this.config?.initialPaperSolLamports?.toString() || '100000000',
       tradeHistory: [],
       moodPauseUntil: null,
       coolDownMints: new Map<string, CoolDownEntry>(),
-      retiredMints: new Map<string, any>(),
+      retiredMints: new Map<string, RetiredMintEntry>(),
       closedTrades: [],
       metrics: {
         discoveredCandidates: 0,
@@ -86,56 +88,90 @@ export class StateStore extends EventEmitter {
     // 1. Load Main State
     if (fs.existsSync(resolvedPath)) {
       try {
-        const parsed = JSON.parse(fs.readFileSync(resolvedPath, 'utf8'));
+        const parsed = JSON.parse(fs.readFileSync(resolvedPath, 'utf8')) as Record<string, unknown>;
 
         const rechecks = Array.isArray(parsed.pendingCandidateRechecks)
-          ? parsed.pendingCandidateRechecks
+          ? (parsed.pendingCandidateRechecks as RecheckItem[])
           : [];
         this.state.pendingCandidateRechecks = new Map(
-          rechecks.filter((e: RecheckItem) => e?.mint).map((e: RecheckItem) => [e.mint, e])
+          rechecks.filter((e) => e?.mint).map((e) => [e.mint, e])
         );
 
-        const positions = Array.isArray(parsed.positions) ? parsed.positions : [];
-        this.state.positions = new Map(positions.map((p: Position) => [p.mint, p]));
+        const positions = Array.isArray(parsed.positions) ? (parsed.positions as Position[]) : [];
+        this.state.positions = new Map(positions.map((p) => [p.mint, p]));
 
-        this.state.launchHistory = Array.isArray(parsed.launchHistory) ? parsed.launchHistory : [];
+        const launchHistoryRaw = parsed.launchHistory;
+        if (Array.isArray(launchHistoryRaw)) {
+          this.state.launchHistory = launchHistoryRaw as LaunchHistoryEntry[];
+        }
         this.state.paperSolBalanceLamports =
-          parsed.paperSolBalanceLamports ?? this.config.initialPaperSolLamports?.toString();
-        this.state.tradeHistory = Array.isArray(parsed.tradeHistory) ? parsed.tradeHistory : [];
-        this.state.moodPauseUntil = parsed.moodPauseUntil || null;
-        this.state.coolDownMints = new Map(Object.entries(parsed.coolDownMints || {}));
-        this.state.retiredMints = new Map(Object.entries(parsed.retiredMints || {}));
-        this.state.closedTrades = Array.isArray(parsed.closedTrades) ? parsed.closedTrades : [];
-        this.state.metrics = { ...this.state.metrics, ...(parsed.metrics || {}) };
+          (parsed.paperSolBalanceLamports as string) ??
+          this.config.initialPaperSolLamports?.toString();
+        const tradeHistoryRaw = parsed.tradeHistory;
+        if (Array.isArray(tradeHistoryRaw)) {
+          this.state.tradeHistory = tradeHistoryRaw as boolean[];
+        }
+        this.state.moodPauseUntil = (parsed.moodPauseUntil as number) || null;
+        this.state.coolDownMints = new Map(
+          Object.entries((parsed.coolDownMints as Record<string, CoolDownEntry>) || {})
+        );
+        this.state.retiredMints = new Map(
+          Object.entries((parsed.retiredMints as Record<string, RetiredMintEntry>) || {})
+        );
+        const closedTradesRaw = parsed.closedTrades;
+        if (Array.isArray(closedTradesRaw)) {
+          this.state.closedTrades = closedTradesRaw as ClosedTrade[];
+        }
+        const metricsRaw = parsed.metrics;
+        if (metricsRaw && typeof metricsRaw === 'object') {
+          this.state.metrics = {
+            ...this.state.metrics,
+            ...(metricsRaw as Partial<StateMetrics>),
+          };
+        }
 
         log(this.config.logFile, 'Main state loaded successfully.', 'info');
-      } catch (error: any) {
-        log(this.config.logFile, `Failed to load main state: ${error.message}`, 'warn');
+      } catch (error: unknown) {
+        log(
+          this.config.logFile,
+          `Failed to load main state: ${error instanceof Error ? error.message : String(error)}`,
+          'warn'
+        );
       }
     }
 
     // 2. Load Processed Mints (Legacy fallback to main state if mintsFile doesn't exist)
     if (fs.existsSync(resolvedMintsPath)) {
       try {
-        const parsed = JSON.parse(fs.readFileSync(resolvedMintsPath, 'utf8'));
-        this.state.processedMintQueue = Array.isArray(parsed.processedMintQueue)
-          ? parsed.processedMintQueue
-          : [];
+        const parsedMints = JSON.parse(fs.readFileSync(resolvedMintsPath, 'utf8')) as Record<
+          string,
+          unknown
+        >;
+        const queue = parsedMints.processedMintQueue;
+        this.state.processedMintQueue = Array.isArray(queue) ? (queue as string[]) : [];
         this.state.processedMints = new Set(this.state.processedMintQueue);
         log(
           this.config.logFile,
           `Loaded ${this.state.processedMints.size} processed mints from dedicated file.`,
           'info'
         );
-      } catch (error: any) {
-        log(this.config.logFile, `Failed to load mints state: ${error.message}`, 'warn');
+      } catch (error: unknown) {
+        log(
+          this.config.logFile,
+          `Failed to load mints state: ${error instanceof Error ? error.message : String(error)}`,
+          'warn'
+        );
       }
     } else if (fs.existsSync(resolvedPath)) {
       // Fallback for first run after refactor: check if they were in the main state
       try {
-        const parsed = JSON.parse(fs.readFileSync(resolvedPath, 'utf8'));
-        if (Array.isArray(parsed.processedMintQueue)) {
-          this.state.processedMintQueue = parsed.processedMintQueue;
+        const parsedFallback = JSON.parse(fs.readFileSync(resolvedPath, 'utf8')) as Record<
+          string,
+          unknown
+        >;
+        const queueFallback = parsedFallback.processedMintQueue;
+        if (Array.isArray(queueFallback)) {
+          this.state.processedMintQueue = queueFallback as string[];
           this.state.processedMints = new Set(this.state.processedMintQueue);
           log(
             this.config.logFile,
@@ -200,8 +236,12 @@ export class StateStore extends EventEmitter {
         if (this.config.metricsFile) {
           await atomicWriteFile(this.config.metricsFile, safeJsonStringify(this.state.metrics, 2));
         }
-      } catch (err: any) {
-        log(this.config.logFile, `Main persistence failed: ${err.message}`, 'error');
+      } catch (err: unknown) {
+        log(
+          this.config.logFile,
+          `Main persistence failed: ${err instanceof Error ? err.message : String(err)}`,
+          'error'
+        );
       }
 
       // 2. Persist Mints State (Lazily)
@@ -210,8 +250,12 @@ export class StateStore extends EventEmitter {
         try {
           await atomicWriteFile(this.config.mintsFile, safeJsonStringify(mintsPayload));
           this._mintsChanged = false;
-        } catch (err: any) {
-          log(this.config.logFile, `Mints persistence failed: ${err.message}`, 'error');
+        } catch (err: unknown) {
+          log(
+            this.config.logFile,
+            `Mints persistence failed: ${err instanceof Error ? err.message : String(err)}`,
+            'error'
+          );
         }
       }
     });
@@ -282,11 +326,11 @@ export class StateStore extends EventEmitter {
    * @param key - The metric key.
    * @param amount - The amount to increment by.
    */
-  public incrementMetric(key: string, amount = 1): void {
-    const metrics = this.state.metrics as any;
-    if (metrics[key] !== undefined) {
-      metrics[key] += amount;
-      this.emit('metricUpdated', { key, value: metrics[key] });
+  public incrementMetric(key: keyof StateMetrics, amount = 1): void {
+    const value = this.state.metrics[key];
+    if (typeof value === 'number') {
+      (this.state.metrics as unknown as Record<keyof StateMetrics, number>)[key] = value + amount;
+      this.emit('metricUpdated', { key, value: this.state.metrics[key] });
     }
   }
 
@@ -404,27 +448,33 @@ export class StateStore extends EventEmitter {
    */
   public updateLaunchHistory(launches: TokenMetadata[]): void {
     const now = Date.now();
-    const historyMap = new Map(this.state.launchHistory.map((l) => [l.mint, l]));
+    const historyMap = new Map<string, LaunchHistoryEntry>(
+      this.state.launchHistory.map((l) => [l.mint, l])
+    );
 
     for (const token of launches) {
       if (!token.id) continue;
       const p = Number(token.usdPrice || 0);
       if (!(p > 0)) continue;
 
-      let entry = historyMap.get(token.id);
-      if (!entry) {
-        entry = {
+      const existingEntry = historyMap.get(token.id);
+      if (!existingEntry) {
+        const newEntry: LaunchHistoryEntry = {
           mint: token.id,
           firstSeenPrice: p,
           highestSeenPrice: p,
           isSuccess: false,
           timestamp: now,
         };
-        this.state.launchHistory.push(entry);
+        this.state.launchHistory.push(newEntry);
+        historyMap.set(token.id, newEntry);
       } else {
-        entry.highestSeenPrice = Math.max(entry.highestSeenPrice, p);
-        if (!entry.isSuccess && entry.highestSeenPrice >= entry.firstSeenPrice * 1.5) {
-          entry.isSuccess = true;
+        existingEntry.highestSeenPrice = Math.max(existingEntry.highestSeenPrice, p);
+        if (
+          !existingEntry.isSuccess &&
+          existingEntry.highestSeenPrice >= existingEntry.firstSeenPrice * 1.5
+        ) {
+          existingEntry.isSuccess = true;
         }
       }
     }
@@ -500,6 +550,13 @@ export class StateStore extends EventEmitter {
       this.emit('marketSnapshotRemoved', mint);
       this.persist();
     }
+  }
+
+  /**
+   * Waits for all pending persistence operations to complete.
+   */
+  public async flush(): Promise<void> {
+    await this._persistencePromise;
   }
 
   /**

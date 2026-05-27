@@ -1,3 +1,5 @@
+import { address, Address } from '@solana/addresses';
+import { SolanaRpcApi } from '@solana/rpc';
 import { sleep, log, rpcCall, PRIORITY } from '../../core/utils.js';
 import {
   PUMP_FUN_PROGRAM_ID,
@@ -32,24 +34,49 @@ export const discoveryState: DiscoveryState = {
   lastEventAt: new Map(),
 };
 
+interface ParsedInstruction {
+  parsed?: {
+    type?: string;
+    info?: {
+      mint?: string;
+    };
+  };
+}
+
+interface InnerInstruction {
+  instructions: ParsedInstruction[];
+}
+
+interface TransactionData {
+  transaction?: {
+    message?: {
+      instructions: ParsedInstruction[];
+    };
+  };
+  meta?: {
+    innerInstructions?: InnerInstruction[];
+  };
+}
+
 /**
  * Processes a program log notification to identify potential new token mints.
  */
 export function handleDiscoveryProgramLog(
   ctx: Context,
-  logInfo: any,
+  logInfo: unknown,
   programId: string,
   scheduleDiscoverySignalFlush: () => void
 ): void {
   discoveryState.lastEventAt.set(programId, Date.now());
   if (!ctx.config.discoveryWsEnabled) return;
-  if (!logInfo?.signature || !Array.isArray(logInfo.logs)) return;
+  const info = logInfo as { signature: string; logs: string[] };
+  if (!info?.signature || !Array.isArray(info.logs)) return;
 
   let match = false;
   let extractedMint: string | null = null;
 
   if (programId === PUMP_FUN_PROGRAM_ID) {
-    for (const line of logInfo.logs) {
+    for (const line of info.logs) {
       if (PUMP_FUN_CREATE_LOG_PATTERN.test(line)) match = true;
       const mintMatch = line.match(PUMP_FUN_MINT_LOG_PATTERN);
       if (mintMatch && mintMatch[1]) {
@@ -58,18 +85,18 @@ export function handleDiscoveryProgramLog(
       }
     }
   } else if (programId === RAYDIUM_AMM_V4_PROGRAM_ID) {
-    match = logInfo.logs.some((line: string) => RAYDIUM_INIT_LOG_PATTERN.test(line));
+    match = info.logs.some((line: string) => RAYDIUM_INIT_LOG_PATTERN.test(line));
   } else if (programId === METEORA_DLMM_PROGRAM_ID) {
-    match = logInfo.logs.some((line: string) => METEORA_INIT_LOG_PATTERN.test(line));
+    match = info.logs.some((line: string) => METEORA_INIT_LOG_PATTERN.test(line));
   } else {
-    match = logInfo.logs.some((line: string) => INITIALIZE_MINT_LOG_PATTERN.test(line));
+    match = info.logs.some((line: string) => INITIALIZE_MINT_LOG_PATTERN.test(line));
   }
 
   if (extractedMint) {
     discoveryState.pendingMints.set(extractedMint, programId);
     scheduleDiscoverySignalFlush();
   } else if (match) {
-    discoveryState.pendingSignatures.set(logInfo.signature, programId);
+    discoveryState.pendingSignatures.set(info.signature, programId);
     scheduleDiscoverySignalFlush();
   }
 }
@@ -79,7 +106,7 @@ export function handleDiscoveryProgramLog(
  */
 export async function flushDiscoverySignals(
   ctx: Context,
-  runLoop: (req: any) => Promise<void>
+  runLoop: (req: Record<string, unknown>) => Promise<void>
 ): Promise<void> {
   const signatureEntries = Array.from(discoveryState.pendingSignatures.entries());
   discoveryState.pendingSignatures.clear();
@@ -138,16 +165,17 @@ export async function flushDiscoverySignals(
               ctx,
               'getTransaction',
               [
-                sig,
+                sig as unknown as Parameters<SolanaRpcApi['getTransaction']>[0],
                 {
                   commitment: 'confirmed',
-                  encoding: 'jsonParsed',
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment
+                  encoding: 'jsonParsed' as any,
                   maxSupportedTransactionVersion: 0,
                 },
               ],
               { priority: PRIORITY.LOW }
             );
-            return { tx, programId };
+            return { tx: tx as unknown as TransactionData, programId };
           } catch {
             return null;
           }
@@ -179,19 +207,23 @@ export async function flushDiscoverySignals(
 /**
  * Extracts initialized mint addresses from a parsed transaction.
  */
-function extractInitializedMints(tx: any): string[] {
+function extractInitializedMints(tx: unknown): string[] {
   const mints = new Set<string>();
-  const collect = (ixs: any[]) => {
+  const txData = tx as TransactionData;
+  const collect = (ixs: ParsedInstruction[] | undefined) => {
     if (!Array.isArray(ixs)) return;
     for (const ix of ixs) {
-      const type = String(ix?.parsed?.type || '').toLowerCase();
-      const mint = ix?.parsed?.info?.mint;
+      const parsed = ix?.parsed;
+      const type = String(parsed?.type || '').toLowerCase();
+      const info = parsed?.info;
+      const mint = info?.mint;
       if ((type === 'initializemint' || type === 'initializemint2') && typeof mint === 'string')
         mints.add(mint);
     }
   };
-  collect(tx?.transaction?.message?.instructions);
-  (tx?.meta?.innerInstructions || []).forEach((g: any) => collect(g?.instructions));
+  collect(txData?.transaction?.message?.instructions);
+  const meta = txData?.meta;
+  (meta?.innerInstructions || []).forEach((g) => collect(g?.instructions));
   return Array.from(mints);
 }
 
@@ -209,7 +241,10 @@ export async function subscribeToProgramLogs(
     while (!controller.signal.aborted) {
       try {
         const notifications = await ctx.rpcSubscriptions
-          .logsNotifications({ mentions: [programId] }, { commitment: 'confirmed' })
+          .logsNotifications(
+            { mentions: [address(programId)] as [Address] },
+            { commitment: 'confirmed' }
+          )
           .subscribe({ abortSignal: controller.signal });
 
         discoveryState.websocketReady = true;
@@ -221,12 +256,12 @@ export async function subscribeToProgramLogs(
           const val = notification?.value || notification;
           handleDiscoveryProgramLog(ctx, val, programId, scheduleDiscoverySignalFlush);
         }
-      } catch (error: any) {
+      } catch (error: unknown) {
         discoveryState.websocketReady = false;
         if (!controller.signal.aborted) {
           log(
             ctx.config.logFile,
-            `WebSocket logs subscription failed for ${programId}: ${error.message}. Retrying in 5s...`,
+            `WebSocket logs subscription failed for ${programId}: ${error instanceof Error ? error.message : String(error)}. Retrying in 5s...`,
             'warn',
             { console: true }
           );

@@ -38,6 +38,23 @@ export interface WalletBalance {
   uiAmount: number;
 }
 
+interface TokenAccountInfo {
+  value: Array<{
+    account: {
+      data: {
+        parsed: {
+          info: {
+            tokenAmount: {
+              amount: string;
+              decimals: number;
+            };
+          };
+        };
+      };
+    };
+  }>;
+}
+
 /**
  * Fetches the token balance for a given mint in the current wallet.
  * Supports both paper trading and live wallet checks.
@@ -52,7 +69,7 @@ export async function getWalletTokenBalance(
 ): Promise<WalletBalance> {
   if (ctx.config.paperTrading) {
     const pos = ctx.state.positions.get(mint);
-    const raw = BigInt(pos?.initialTokenAmountRaw || '0'); // Fallback to initialTokenAmountRaw if lastKnownBalanceRaw not parsed
+    const raw = BigInt(pos?.initialTokenAmountRaw || '0');
     const dec = Number(pos?.decimals || 0);
     return {
       mint,
@@ -61,7 +78,7 @@ export async function getWalletTokenBalance(
       uiAmount: Number(atomicToDecimalString(raw, dec, 9)),
     };
   }
-  const res = await rpcCall(
+  const res = (await rpcCall(
     ctx,
     'getTokenAccountsByOwner',
     [
@@ -70,14 +87,15 @@ export async function getWalletTokenBalance(
       { encoding: 'jsonParsed', commitment: 'confirmed' },
     ],
     { priority }
-  );
+  )) as unknown as TokenAccountInfo;
+
   let raw = 0n;
   let dec = 0;
   for (const acc of res.value || []) {
     const info = acc.account.data?.parsed?.info?.tokenAmount;
     if (info?.amount) {
       raw += BigInt(info.amount);
-      dec = info.decimals;
+      dec = Number(info.decimals);
     }
   }
   return {
@@ -90,10 +108,6 @@ export async function getWalletTokenBalance(
 
 /**
  * Fetches dynamic priority fees based on recent prioritization fees on-chain.
- * @param ctx - The application context.
- * @param accountKeys - Keys to check for prioritization.
- * @param isPanic - Whether to apply the panic multiplier.
- * @returns Effective priority fee in micro-lamports.
  */
 export async function fetchDynamicPriorityFee(
   ctx: Context,
@@ -102,17 +116,15 @@ export async function fetchDynamicPriorityFee(
 ): Promise<number> {
   try {
     const publicKeys = accountKeys.map((key) => address(key));
-    const fees = await rpcCall(ctx, 'getRecentPrioritizationFees', [publicKeys], {
+    const fees = (await rpcCall(ctx, 'getRecentPrioritizationFees', [publicKeys], {
       priority: PRIORITY.HIGH,
-    });
+    })) as unknown as Array<{ prioritizationFee: number }>;
 
     if (fees.length === 0) {
       return ctx.config.priorityFeeBaseMicroLamports;
     }
 
-    const sortedFees = fees
-      .map((f: any) => f.prioritizationFee)
-      .sort((a: number, b: number) => a - b);
+    const sortedFees = fees.map((f) => f.prioritizationFee).sort((a: number, b: number) => a - b);
     const index = Math.floor((ctx.config.priorityFeePercentile / 100) * (sortedFees.length - 1));
     const baseFee = sortedFees[index] || 0;
 
@@ -122,8 +134,11 @@ export async function fetchDynamicPriorityFee(
     }
 
     return Math.min(finalFee, ctx.config.priorityFeeMaxMicroLamports);
-  } catch (error: any) {
-    ctx.logger(`Failed to fetch priority fees: ${error.message}. Using base fee.`, 'warn');
+  } catch (error: unknown) {
+    ctx.logger(
+      `Failed to fetch priority fees: ${error instanceof Error ? error.message : String(error)}. Using base fee.`,
+      'warn'
+    );
     return ctx.config.priorityFeeBaseMicroLamports;
   }
 }
@@ -188,16 +203,24 @@ export async function fetchSdkSwapOrder(
     return {
       transaction: swapResult.swapTransaction,
       lastValidBlockHeight: swapResult.lastValidBlockHeight,
-      requestId: (swapResult as any).requestId,
+      requestId: (swapResult as unknown as Record<string, unknown>).requestId as string | undefined,
     };
-  } catch (error: any) {
-    if (error.name === 'ResponseError' && error.response) {
-      const status = error.response.status;
+  } catch (error: unknown) {
+    if (
+      error instanceof Error &&
+      (error as unknown as Record<string, unknown>).name === 'ResponseError' &&
+      (error as unknown as Record<string, unknown>).response
+    ) {
+      const response = (error as unknown as Record<string, unknown>).response as {
+        status: number;
+        json: () => Promise<unknown>;
+      };
+      const status = response.status;
       let body = 'unable to parse body';
       try {
-        body = JSON.stringify(await error.response.json());
+        body = JSON.stringify(await response.json());
       } catch {}
-      throw new Error(`Jupiter SDK error ${status}: ${body}`);
+      throw new Error(`Jupiter SDK error ${status}: ${body}`, { cause: error });
     }
     throw error;
   }
@@ -229,17 +252,22 @@ export async function fetchSwapOrder(
 
   const url = `${ctx.config.jupiterBaseUrl}/swap/v2/order?${params.toString()}`;
   try {
-    const order = await fetchJson(url, {
+    const order = (await fetchJson(url, {
       headers: { 'x-api-key': ctx.config.jupiterApiKey },
-    });
+    })) as Record<string, unknown>;
 
     if (!order || !order.transaction) {
-      throw new Error(order?.errorMessage || order?.error || 'No transaction from Jupiter.');
+      throw new Error(
+        String(order?.errorMessage || order?.error || 'No transaction from Jupiter.')
+      );
     }
 
-    return order;
-  } catch (error: any) {
-    throw new Error(`Jupiter V2 order failed: ${error.message}`);
+    return order as unknown as SwapOrder;
+  } catch (error: unknown) {
+    throw new Error(
+      `Jupiter V2 order failed: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
+    );
   }
 }
 
@@ -253,8 +281,10 @@ export async function executeSwapOrder(ctx: Context, order: SwapOrder): Promise<
   return executeSwapOrderViaRpc(ctx, order);
 }
 
-function getSignedTransactionBase64(transaction: any): string {
-  return getBase64EncodedWireTransaction(transaction);
+function getSignedTransactionBase64(transaction: unknown): string {
+  return getBase64EncodedWireTransaction(
+    transaction as Parameters<typeof getBase64EncodedWireTransaction>[0]
+  ) as string;
 }
 
 async function signSwapTransaction(
@@ -265,13 +295,16 @@ async function signSwapTransaction(
   const transactionBytes = Buffer.from(order.transaction, 'base64');
   const transaction = getTransactionDecoder().decode(transactionBytes);
   const signer = allowPartialSignatures ? partiallySignTransaction : signTransaction;
-  const signedTransaction = await signer([ctx.wallet.keypair], transaction as any);
+  const signedTransaction = await signer(
+    [ctx.wallet.keypair],
+    transaction as Parameters<typeof signer>[1]
+  );
   return getSignedTransactionBase64(signedTransaction);
 }
 
 async function executeJupiterManagedOrder(ctx: Context, order: SwapOrder): Promise<string> {
   const signedTransaction = await signSwapTransaction(ctx, order, true);
-  const body: any = {
+  const body: Record<string, unknown> = {
     signedTransaction,
     requestId: order.requestId,
   };
@@ -280,40 +313,41 @@ async function executeJupiterManagedOrder(ctx: Context, order: SwapOrder): Promi
     body.lastValidBlockHeight = order.lastValidBlockHeight;
   }
 
-  const result = await fetchJson(`${ctx.config.jupiterBaseUrl}/swap/v2/execute`, {
+  const result = (await fetchJson(`${ctx.config.jupiterBaseUrl}/swap/v2/execute`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
       'x-api-key': ctx.config.jupiterApiKey,
     },
     body,
-  });
+  })) as Record<string, unknown>;
 
   if (!result || result.status !== 'Success' || !result.signature) {
     const details = result ? JSON.stringify(result) : 'empty response';
     throw new Error(`Jupiter execute failed: ${details}`);
   }
 
-  return result.signature;
+  return result.signature as string;
 }
 
 async function executeSwapOrderViaRpc(ctx: Context, order: SwapOrder): Promise<string> {
   const wireTransactionBase64 = await signSwapTransaction(ctx, order, false);
 
-  const sig = await rpcCall(
+  const sig = (await rpcCall(
     ctx,
     'sendTransaction',
     [
-      wireTransactionBase64,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      wireTransactionBase64 as any,
       {
         encoding: 'base64',
-        maxRetries: 3,
+        maxRetries: 3n,
         preflightCommitment: 'confirmed',
         skipPreflight: false,
       },
     ],
     { priority: PRIORITY.HIGH }
-  );
+  )) as string;
 
   const abortController = new AbortController();
   const timeout = setTimeout(() => {
@@ -323,7 +357,10 @@ async function executeSwapOrderViaRpc(ctx: Context, order: SwapOrder): Promise<s
 
   try {
     const notifications = await ctx.rpcSubscriptions
-      .signatureNotifications(sig, { commitment: 'confirmed' })
+      .signatureNotifications(
+        sig as unknown as Parameters<typeof ctx.rpcSubscriptions.signatureNotifications>[0],
+        { commitment: 'confirmed' }
+      )
       .subscribe({ abortSignal: abortController.signal });
 
     for await (const notification of notifications) {
@@ -337,9 +374,9 @@ async function executeSwapOrderViaRpc(ctx: Context, order: SwapOrder): Promise<s
       }
     }
     return sig;
-  } catch (err: any) {
+  } catch (err: unknown) {
     clearTimeout(timeout);
-    if (err.name === 'AbortError') {
+    if (err instanceof Error && err.name === 'AbortError') {
       return sig;
     }
     throw err;
@@ -353,8 +390,9 @@ export async function estimateSolUsdPrice(
   ctx: Context,
   apiKey: string | null = null
 ): Promise<number> {
-  if (typeof (ctx as any).getSolUsdPrice === 'function') {
-    const overriddenPrice = Number(await (ctx as any).getSolUsdPrice());
+  const walletAny = ctx as unknown as Record<string, unknown>;
+  if (typeof walletAny.getSolUsdPrice === 'function') {
+    const overriddenPrice = Number(await (walletAny.getSolUsdPrice as () => Promise<number>)());
     if (overriddenPrice > 0) return overriddenPrice;
   }
 
@@ -364,11 +402,14 @@ export async function estimateSolUsdPrice(
   }
 
   const url = `${ctx.config.jupiterBaseUrl}/price/v3?ids=${SOL_MINT}`;
-  const response = await fetchJson(url, {
+  const response = (await fetchJson(url, {
     headers: { 'x-api-key': apiKey || ctx.config.jupiterApiKey },
-  });
+  })) as Record<string, unknown>;
 
-  const priceMap = response?.data ?? response;
+  const priceMap = (response?.data ?? response) as Record<
+    string,
+    { usdPrice?: string | number; price?: string | number }
+  >;
   if (!priceMap?.[SOL_MINT]) {
     ctx.logger(`Jupiter price response missing SOL: ${JSON.stringify(response)}`, 'error');
     throw new Error('No SOL price available.');

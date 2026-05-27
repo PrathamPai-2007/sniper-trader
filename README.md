@@ -4,6 +4,17 @@
 ![Solana](https://img.shields.io/badge/blockchain-Solana-black)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
+---
+
+## Disclaimer
+
+> [!WARNING]
+> **Financial Risk**: Trading cryptocurrencies, especially memecoins on Solana, involves significant risk of loss. This software is provided "as is" without warranty of any kind. Always test your strategies in `PAPER_TRADING=true` and `DRY_RUN=true` modes. Never deploy capital you cannot afford to lose.
+>
+> **Tax Responsibility**: Ensure you know the tax laws in your country and pay taxes responsibly. The developers and contributors of Veloci-Buy are not responsible for your tax obligations or compliance.
+
+---
+
 **Veloci-Buy** is an industry-grade, event-driven discovery and sniping engine engineered for the Solana ecosystem. Designed for professional traders and developers, it delivers sub-second reaction times by combining a high-concurrency ingestion pipeline with a sophisticated, multi-stage risk mitigation architecture.
 
 > [!NOTE]
@@ -15,15 +26,15 @@
 
 Veloci-Buy is built on a decoupled, service-oriented architecture that prioritizes modularity and low-latency execution:
 
-- **Orchestration ([src/index.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/index.ts))**: Manages high-precision loop watchdogs, system lifecycle, and global event coordination.
-- **Scanner Service ([src/services/scanner/scanner.service.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/services/scanner/scanner.service.ts))**: Handles candidate identification, multi-stage audit scheduling, and re-audit loops.
-- **Event Ingestion ([src/services/discovery/discovery.service.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/services/discovery/discovery.service.ts))**: A high-speed log ingestion and parsing pipeline for real-time WebSocket discovery.
-- **Heuristic Engine ([src/services/engine/engine.service.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/services/engine/engine.service.ts))**: Scores candidates using organic traction metrics, GMI filters, and momentum analysis.
-- **Security Audit ([src/services/audit/audit.service.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/services/audit/audit.service.ts))**: Direct RPC-based authority audits and smart holder concentration checks.
-- **Execution Adapter ([src/services/trading/trading.service.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/services/trading/trading.service.ts))**: Jupiter swap builder supporting paper simulations, dry-runs, and live orders.
-- **Risk Monitor ([src/services/monitor/monitor.service.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/services/monitor/monitor.service.ts))**: Dynamic profit targets, trailing stop-losses, insider drift guards, and spread velocity exit checks.
-- **State Store ([src/core/store.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/core/store.ts))**: Atomically persists runtime states, cool-downs, and historical stats.
-- **Toolkit ([src/core/utils.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/core/utils.ts))**: Shared logging, serialization, notification, and async flow pools.
+- **Orchestration ([src/index.ts](src/index.ts))**: Encapsulated within the `VelociBuyBot` class, managing high-precision loop watchdogs, system lifecycle, and global event coordination with resilient shutdown handlers.
+- **Scanner Service ([src/services/scanner/scanner.service.ts](src/services/scanner/scanner.service.ts))**: Handles candidate identification, multi-stage audit scheduling, and re-audit loops.
+- **Event Ingestion ([src/services/discovery/discovery.service.ts](src/services/discovery/discovery.service.ts))**: A high-speed log ingestion and parsing pipeline for real-time WebSocket discovery.
+- **Heuristic Engine ([src/services/engine/engine.service.ts](src/services/engine/engine.service.ts))**: Scores candidates using organic traction metrics, GMI filters, and momentum analysis.
+- **Security Audit ([src/services/audit/audit.service.ts](src/services/audit/audit.service.ts))**: Direct RPC-based authority audits and smart holder concentration checks.
+- **Execution Adapter ([src/services/trading/trading.service.ts](src/services/trading/trading.service.ts))**: Jupiter swap builder supporting paper simulations, dry-runs, and live orders.
+- **Risk Monitor ([src/services/monitor/monitor.service.ts](src/services/monitor/monitor.service.ts))**: Dynamic profit targets, trailing stop-losses, insider drift guards, and spread velocity exit checks.
+- **State Store ([src/core/store.ts](src/core/store.ts))**: Atomically persists runtime states, cool-downs, and historical stats.
+- **Toolkit ([src/core/utils.ts](src/core/utils.ts))**: Shared logging, serialization, notification, and async flow pools.
 
 ---
 
@@ -107,14 +118,14 @@ Veloci-Buy is maintained with high engineering standards to ensure reliability i
 
 Veloci-Buy uses a robust, modular test suite leveraging Node's native `node:test` runner. The monolithic `tests.js` has been refactored into focused files under the `tests/` directory:
 
-- **[tests/\_test_helpers.js](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/tests/_test_helpers.js)**: Reusable configurations, sandbox context states, `fetch` mockers, member patchers, and state seeds.
-- **[tests/engine.test.js](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/tests/engine.test.js)**: Evaluates decision engine scoring, GMI aggro modifications, memecoin filter matching, and candidate evaluation buffers.
-- **[tests/scanner.test.js](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/tests/scanner.test.js)**: Tests event schedules, survival delay tiers, indexing-lag wait caps, and slot reservations.
-- **[tests/services.test.js](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/tests/services.test.js)**: Exercises the high-level trade lifecycle including paper swaps, dry-runs, and token balance queries.
-- **[tests/audit.test.js](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/tests/audit.test.js)**: Exercises token authority safety audits, indexing lag retries, and GoPlus address scanning.
-- **[tests/monitor.test.js](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/tests/monitor.test.js)**: Focuses on dynamic TP/SL execution, volatility stop-loss bounds, insider drift, and emergency exits.
-- **[tests/config.test.js](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/tests/config.test.js)**: Validates startup constraints, live trading safety checks, and invalid bounds rejection.
-- **[tests/utils.test.js](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/tests/utils.test.js)**: Covers Windows EPERM write retries, safe JSON serialization, standard deviation, and curve decoders.
+- **[tests/\_test_helpers.js](tests/_test_helpers.js)**: Reusable configurations, sandbox context states, `fetch` mockers, member patchers, and state seeds.
+- **[tests/engine.test.js](tests/engine.test.js)**: Evaluates decision engine scoring, GMI aggro modifications, memecoin filter matching, and candidate evaluation buffers.
+- **[tests/scanner.test.js](tests/scanner.test.js)**: Tests event schedules, survival delay tiers, indexing-lag wait caps, and slot reservations.
+- **[tests/services.test.js](tests/services.test.js)**: Exercises the high-level trade lifecycle including paper swaps, dry-runs, and token balance queries.
+- **[tests/audit.test.js](tests/audit.test.js)**: Exercises token authority safety audits, indexing lag retries, and GoPlus address scanning.
+- **[tests/monitor.test.js](tests/monitor.test.js)**: Focuses on dynamic TP/SL execution, volatility stop-loss bounds, insider drift, and emergency exits.
+- **[tests/config.test.js](tests/config.test.js)**: Validates startup constraints, live trading safety checks, and invalid bounds rejection.
+- **[tests/utils.test.js](tests/utils.test.js)**: Covers Windows EPERM write retries, safe JSON serialization, standard deviation, and curve decoders.
 
 ### Run Commands
 
@@ -142,7 +153,7 @@ npm run ci
 
 ## Configuration Optimization (`node analyze.js`)
 
-To optimize the exit strategy parameters of your trading engine, Veloci-Buy includes a post-session **Trade Replay Analyzer** ([analyze.js](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/analyze.js)). This tool acts as a local parameter optimizer, backtesting historical trading journals across thousands of strategy permutations to isolate the highest-performing configurations.
+To optimize the exit strategy parameters of your trading engine, Veloci-Buy includes a post-session **Trade Replay Analyzer** ([analyze.js](analyze.js)). This tool acts as a local parameter optimizer, backtesting historical trading journals across thousands of strategy permutations to isolate the highest-performing configurations.
 
 ### How It Works
 
@@ -175,23 +186,30 @@ The console will display the overall sessions ingested, total trades, grid combo
 
 ---
 
-## Changelog
+## v2.x Changelog
 
-### v2.x — Type Hardening & Migration Finalization
+### Persistence Resilience & Class-Based Refactor
+
+- **Class-Based Orchestration**: Refactored the main entry point into a unified `VelociBuyBot` class, eliminating module-level globals and improving modularity and testability.
+- **Resilient State Persistence**: Implemented a mandatory `flush()` mechanism in `StateStore` to ensure all pending state changes are committed to disk during shutdowns.
+- **Enhanced Audit Reliability**: Added exponential backoff and retry logic for security audits to handle RPC indexing lag when verifying token holder concentration.
+- **Persistent Trade History**: Transitioned trade statistics to an append-only `trades.jsonl` format, preserving the complete history of all trades across multiple sessions.
+
+### Type Hardening & Migration Finalization
 
 - **Complete TypeScript Transition**: Migrated the final major logic block, `analyze.js` (Post-Session Optimizer), to `src/core/analyze.ts` with full type safety for trade replays and grid search.
 - **Comprehensive Type Hardening**: Hardened over 50 core interfaces (`Position`, `Context`, `State`, `SwapOrder`) and audit signal structures. Removed dozens of `any` casts and intersection types across all services (`monitor`, `trading`, `scanner`, `audit`).
 - **Strict Data Contracts**: Established formal interfaces for financial transactions and security signals, ensuring compile-time verification of the entire trading pipeline.
 - **Architectural Cleanup**: Formalized the `StateStore` interface to resolve circular dependencies while maintaining strict typing for the global context.
 
-### v2.x — TypeScript Migration & Code Quality Overhaul
+### TypeScript Migration & Code Quality Overhaul
 
-- **Full TypeScript Migration**: Ported codebase to TypeScript with strict validation flags enabled (`strict: true`, `noImplicitAny: true`). Established central type declarations in [src/types/index.ts](file:///C:/Users/prath/OneDrive/Desktop/projects/veloci-buy/src/types/index.ts).
+- **Full TypeScript Migration**: Ported codebase to TypeScript with strict validation flags enabled (`strict: true`, `noImplicitAny: true`). Established central type declarations in [src/types/index.ts](src/types/index.ts).
 - **Decoupled Layout**: Reorganized core codebase into a `src/` directory layout separated into `core` and `services`.
 - **Backward-Compatible Wrappers**: Built backwards-compatible CommonJS exports resolving to the compiled `dist/` directory outputs, allowing legacy CJS scripts and modular test suites to run unmodified.
 - **Prettier & ESLint Guardrails**: Re-configured ESLint flat config with global ignores for compiled and artifact paths. Formatted codebase using Prettier rules.
 
-### v2.x — Performance, Quant Strategy & Parameter Optimization
+### Performance, Quant Strategy & Parameter Optimization
 
 - **Quant Strategy Upgrades**: Added **Global Momentum Index (GMI)** market filter, **Volatility-Adaptive Risk** scaling Stop-Loss, **Accelerated Trailing Stop**, **Insider Drift Tracking** de-risk sold positions on large dumps, and **Spread Velocity Widened Exits**. Decommissioned legacy backtester.
 - **Post-Session Parameter Optimizer**: Created `analyze.js` trade replay analyzer to run 9,216 strategy combo backtests over JSONL journals. Enriched trade logs with 18 fields.
@@ -202,10 +220,4 @@ The console will display the overall sessions ingested, total trades, grid combo
 
 ---
 
-## Disclaimer
-
-**Financial Risk**: Trading cryptocurrencies, especially memecoins on Solana, involves significant risk of loss. This software is provided "as is" without warranty of any kind. Always test your strategies in `PAPER_TRADING=true` and `DRY_RUN=true` modes. Never deploy capital you cannot afford to lose.
-
----
-
-_Developed with focus on speed, safety, and scalability. v2.3 - Type Hardening & Migration Finalization._
+_Developed with focus on speed and safety._

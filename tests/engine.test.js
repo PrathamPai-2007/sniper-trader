@@ -101,8 +101,16 @@ test('engine computes score bonuses from socials and liquidity tiers', () => {
 });
 
 test('engine treats non-string launchpads as unknown profiles', () => {
-  assert.deepEqual(engine.getLaunchpadProfile({ name: 'pump.fun' }), { name: 'unknown' });
-  assert.deepEqual(engine.getLaunchpadProfile(123), { name: 'unknown' });
+  const unknownProfile = {
+    name: 'unknown',
+    scoreBonus: 0,
+    liquidityMultiplier: 1,
+    holderMultiplier: 1,
+    buysMultiplier: 1,
+    minPoolAgeSeconds: 0,
+  };
+  assert.deepEqual(engine.getLaunchpadProfile({ name: 'pump.fun' }), unknownProfile);
+  assert.deepEqual(engine.getLaunchpadProfile(123), unknownProfile);
 });
 
 test('engine applies launchpad-specific threshold multipliers', () => {

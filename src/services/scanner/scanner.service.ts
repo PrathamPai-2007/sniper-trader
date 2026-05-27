@@ -7,7 +7,14 @@ import {
 } from '../../core/utils.js';
 import * as services from '../services.js';
 import { MARKET_SNAPSHOT_RETENTION_MS, SOL_MINT } from '../../core/config.js';
-import { Context, RecheckItem, TokenMetadata, Position } from '../../types/index.js';
+import {
+  Context,
+  RecheckItem,
+  TokenMetadata,
+  Position,
+  EvaluationResult,
+  SwapOrder,
+} from '../../types/index.js';
 
 const MAX_INDEXING_LAG_RETRIES = 3;
 
@@ -33,8 +40,12 @@ export async function scanForCandidates(
   try {
     recentLaunches = await services.fetchRecentLaunches(ctx);
     store.updateLaunchHistory(recentLaunches);
-  } catch (e: any) {
-    log(config.logFile, `Recent launches failed: ${e.message}`, 'warn');
+  } catch (e: unknown) {
+    log(
+      config.logFile,
+      `Recent launches failed: ${e instanceof Error ? e.message : String(e)}`,
+      'warn'
+    );
     return;
   }
 
@@ -58,19 +69,25 @@ export async function scanForCandidates(
           timestamp: Date.now(),
         });
 
-        if ((token as any).bidPrice > 0 && (token as any).askPrice > 0) {
+        const tokenTyped = token as TokenMetadata & { bidPrice?: number; askPrice?: number };
+        if (
+          tokenTyped.bidPrice != null &&
+          tokenTyped.bidPrice > 0 &&
+          tokenTyped.askPrice != null &&
+          tokenTyped.askPrice > 0
+        ) {
           target.spreadHistory = target.spreadHistory || [];
           target.spreadHistory.push({
-            spread: computeSpread((token as any).bidPrice, (token as any).askPrice),
+            spread: computeSpread(tokenTyped.bidPrice, tokenTyped.askPrice),
             timestamp: Date.now(),
           });
         }
 
         const cutoff = Date.now() - 60000;
-        target.priceHistory = target.priceHistory.filter((h: any) => h.timestamp > cutoff);
-        target.tapeHistory = target.tapeHistory.filter((h: any) => h.timestamp > cutoff);
+        target.priceHistory = target.priceHistory.filter((h) => h.timestamp > cutoff);
+        target.tapeHistory = target.tapeHistory.filter((h) => h.timestamp > cutoff);
         if (target.spreadHistory) {
-          target.spreadHistory = target.spreadHistory.filter((h: any) => h.timestamp > cutoff);
+          target.spreadHistory = target.spreadHistory.filter((h) => h.timestamp > cutoff);
         }
 
         if (entry) store.upsertRecheckEntry(target as RecheckItem);
@@ -110,7 +127,11 @@ export async function scanForCandidates(
 
   const workItems: WorkItem[] = [];
   const seenMintsInScan = new Set<string>();
-  const allRawItems: WorkItem[] = [
+  const allRawItems: Array<{
+    kind: 'discovery' | 'recheck';
+    token: TokenMetadata | undefined;
+    recheckEntry?: RecheckItem;
+  }> = [
     ...due.map((e) => ({
       kind: 'recheck' as const,
       recheckEntry: e,
@@ -122,7 +143,7 @@ export async function scanForCandidates(
   for (const item of allRawItems) {
     if (item.token?.id && !seenMintsInScan.has(item.token.id)) {
       seenMintsInScan.add(item.token.id);
-      workItems.push(item);
+      workItems.push(item as WorkItem);
     }
   }
 
@@ -180,30 +201,32 @@ export async function scanForCandidates(
     const priceRefreshStart = Date.now();
     try {
       const prices = await services.fetchPricesBestEffort(ctx, missingPriceMints, 'scan refresh');
-      for (const item of workItems)
-        if (prices[item.token.id]) item.token.usdPrice = prices[item.token.id].usdPrice;
-      if (typeof (ctx as any).recordScanBackpressureEvent === 'function')
-        (ctx as any).recordScanBackpressureEvent(false);
-    } catch (err: any) {
-      if (typeof (ctx as any).recordScanBackpressureEvent === 'function')
-        (ctx as any).recordScanBackpressureEvent(isTransientOperationError(err));
-      log(config.logFile, `Scan price refresh skipped: ${err.message}`, 'warn', { console: false });
+      for (const item of workItems) {
+        const p = prices[item.token.id];
+        if (p) item.token.usdPrice = p.usdPrice;
+      }
+      if (ctx.recordScanBackpressureEvent) ctx.recordScanBackpressureEvent(false);
+    } catch (err: unknown) {
+      if (ctx.recordScanBackpressureEvent)
+        ctx.recordScanBackpressureEvent(isTransientOperationError(err));
+      log(
+        config.logFile,
+        `Scan price refresh skipped: ${err instanceof Error ? err.message : String(err)}`,
+        'warn',
+        { console: false }
+      );
     } finally {
       stageDurations.priceRefreshMs!.push(Date.now() - priceRefreshStart);
     }
   }
 
-  const lightConcurrency =
-    typeof (ctx as any).getEffectiveParallelism === 'function'
-      ? (ctx as any).getEffectiveParallelism(
-          config.scanParallelismLight || config.maxConcurrentAudits || 1
-        )
-      : config.scanParallelismLight || config.maxConcurrentAudits || 1;
+  const lightConcurrency = ctx.getEffectiveParallelism
+    ? ctx.getEffectiveParallelism(config.scanParallelismLight || config.maxConcurrentAudits || 1)
+    : config.scanParallelismLight || config.maxConcurrentAudits || 1;
 
-  const heavyConcurrency =
-    typeof (ctx as any).getEffectiveParallelism === 'function'
-      ? (ctx as any).getEffectiveParallelism(config.scanParallelismHeavy || 1)
-      : config.scanParallelismHeavy || 1;
+  const heavyConcurrency = ctx.getEffectiveParallelism
+    ? ctx.getEffectiveParallelism(config.scanParallelismHeavy || 1)
+    : config.scanParallelismHeavy || 1;
 
   const reserveBuySlot = (): boolean => {
     if (
@@ -255,9 +278,9 @@ export async function scanForCandidates(
       const depth = isFinalAudit ? 'full' : 'cheap';
       const priority = isFinalAudit ? PRIORITY.HIGH : PRIORITY.LOW;
       const auditStart = Date.now();
-      let e: any;
+      let evaluation: EvaluationResult;
 
-      let prefetchedQuotePromise: Promise<any> | null = null;
+      let prefetchedQuotePromise: Promise<SwapOrder | null> | null = null;
       if (isFinalAudit && !config.dryRun && !config.paperTrading) {
         const mood = services.getMoodAdjustments(ctx);
         if (!mood.isPaused) {
@@ -272,14 +295,14 @@ export async function scanForCandidates(
       }
 
       try {
-        e = await services.evaluateCandidate(
+        evaluation = await services.evaluateCandidate(
           ctx,
           token,
           item.recheckEntry?.highestSeenPriceUsd,
-          item.recheckEntry?.tokenSnapshot?.priceHistory, // Fallback to priceHistory arrays if any
+          item.recheckEntry?.tokenSnapshot?.priceHistory || [],
           item.recheckEntry?.basePriceUsd,
-          item.recheckEntry?.tokenSnapshot?.liquidity, // Fallback
-          item.recheckEntry?.tokenSnapshot?.tapeAtStart,
+          item.recheckEntry?.tokenSnapshot?.liquidity,
+          item.recheckEntry?.tokenSnapshot?.tapeAtStart || null,
           item.recheckEntry?.tokenSnapshot?.tapeHistory || [],
           depth,
           priority
@@ -289,16 +312,17 @@ export async function scanForCandidates(
           Date.now() - auditStart
         );
       }
-      if (typeof (ctx as any).recordScanBackpressureEvent === 'function')
-        (ctx as any).recordScanBackpressureEvent(false);
+      if (ctx.recordScanBackpressureEvent) ctx.recordScanBackpressureEvent(false);
 
-      if (!e.approved) {
+      if (!evaluation.approved) {
         rejected++;
 
-        const reasons = Array.isArray(e.rejectionReasons) ? e.rejectionReasons : [];
-        const isRecheckEligible = reasons.some((r: any) => r.recheckEligible);
-        const isBuyingTop = reasons.some((r: any) => r.code === 'buying-the-top');
-        const isLowHolderRecheck = reasons.some((r: any) => r.code === 'low-holders');
+        const reasons = Array.isArray(evaluation.rejectionReasons)
+          ? evaluation.rejectionReasons
+          : [];
+        const isRecheckEligible = reasons.some((r) => r.recheckEligible);
+        const isBuyingTop = reasons.some((r) => r.code === 'buying-the-top');
+        const isLowHolderRecheck = reasons.some((r) => r.code === 'low-holders');
 
         if (isBuyingTop) {
           const currentPrice = Number(token.usdPrice || 0);
@@ -319,7 +343,7 @@ export async function scanForCandidates(
             );
             store.trackMint(token.id);
           } else {
-            schedulePullbackRecheck(ctx, e, item.recheckEntry);
+            schedulePullbackRecheck(ctx, evaluation, item.recheckEntry || null);
             log(
               config.logFile,
               `[PullbackWait] ${token.symbol} still at top; recheck in 10s.`,
@@ -329,12 +353,12 @@ export async function scanForCandidates(
             return;
           }
         } else if (isRecheckEligible && config.borderlineRecheckEnabled) {
-          scheduleRecheckEligibleWaitlist(ctx, e, item.recheckEntry, {
+          scheduleRecheckEligibleWaitlist(ctx, evaluation, item.recheckEntry || null, {
             lowHolderWaitlist: isLowHolderRecheck,
           });
           log(
             config.logFile,
-            `[RecheckEligible] ${token.symbol}: ${e.blockers.join(' | ')}. Rescheduled.`,
+            `[RecheckEligible] ${token.symbol}: ${evaluation.blockers.join(' | ')}. Rescheduled.`,
             'info',
             { console: false }
           );
@@ -348,13 +372,13 @@ export async function scanForCandidates(
         }
         if (item.kind === 'recheck') store.incrementMetric('failedMomentum');
 
-        reasons.forEach((r: any) => {
+        reasons.forEach((r) => {
           if (r.code) store.recordRejection(r.code);
         });
 
         log(
           config.logFile,
-          `[${item.recheckEntry?.isFinalAudit ? 'finalAuditRejected' : 'Rejected'}] ${token.symbol}: ${e.blockers.join(' | ')}`,
+          `[${item.recheckEntry?.isFinalAudit ? 'finalAuditRejected' : 'Rejected'}] ${token.symbol}: ${evaluation.blockers.join(' | ')}`,
           'warn',
           { console: false }
         );
@@ -364,7 +388,7 @@ export async function scanForCandidates(
       if (item.kind === 'discovery' || item.recheckEntry?.isWaitlist) {
         if (item.kind === 'discovery') store.incrementMetric('discoveredCandidates');
         store.incrementMetric('passedCheapAudit');
-        scheduleSurvivalDelay(ctx, e);
+        scheduleSurvivalDelay(ctx, evaluation);
         log(
           config.logFile,
           `${item.kind === 'discovery' ? 'Discovered' : 'Waitlist passed:'} ${token.symbol}; survival armed.`,
@@ -377,7 +401,7 @@ export async function scanForCandidates(
       if (item.recheckEntry?.isSurvivalWait) {
         store.incrementMetric('passedSurvival');
         store.incrementMetric('finalAuditQueued');
-        scheduleFinalAudit(ctx, e, item.recheckEntry);
+        scheduleFinalAudit(ctx, evaluation, item.recheckEntry);
         log(
           config.logFile,
           `[finalAuditQueued] ${token.symbol} passed survival; fact-checking (5s)...`,
@@ -394,7 +418,7 @@ export async function scanForCandidates(
       if (!reserveBuySlot()) return;
       const buyStart = Date.now();
       try {
-        const pos = await services.buyCandidate(ctx, e, prefetchedQuotePromise);
+        const pos = await services.buyCandidate(ctx, evaluation, prefetchedQuotePromise);
         stageDurations.buyAttemptMs!.push(Date.now() - buyStart);
         store.trackMint(token.id);
         if (pos) {
@@ -405,10 +429,10 @@ export async function scanForCandidates(
       } finally {
         releaseBuySlot();
       }
-    } catch (err: any) {
-      if (typeof (ctx as any).recordScanBackpressureEvent === 'function')
-        (ctx as any).recordScanBackpressureEvent(isTransientOperationError(err));
-      const message = String(err?.message || err);
+    } catch (err: unknown) {
+      if (ctx.recordScanBackpressureEvent)
+        ctx.recordScanBackpressureEvent(isTransientOperationError(err));
+      const message = err instanceof Error ? err.message : String(err);
       if (!message.includes('RPC Indexing Lag')) {
         errors++;
         log(config.logFile, `Error processing ${token?.symbol || 'unknown'}: ${message}`, 'error');
@@ -435,7 +459,7 @@ export async function scanForCandidates(
 
   log(
     config.logFile,
-    `Scan stages: priceRefreshMs=${summarizeDurations(stageDurations.priceRefreshMs)}, directMarketMs=${summarizeDurations(stageDurations.directMarketMs)}, lightAuditMs=${summarizeDurations(stageDurations.lightAuditMs)}, heavyAuditMs=${summarizeDurations(stageDurations.heavyAuditMs)}, buyAttemptMs=${summarizeDurations(stageDurations.buyAttemptMs)}, concurrency=light:${lightConcurrency},heavy:${heavyConcurrency}, backpressure=${((ctx as any).scanBackpressureFactor || 1).toFixed(2)}`,
+    `Scan stages: priceRefreshMs=${summarizeDurations(stageDurations.priceRefreshMs)}, directMarketMs=${summarizeDurations(stageDurations.directMarketMs)}, lightAuditMs=${summarizeDurations(stageDurations.lightAuditMs)}, heavyAuditMs=${summarizeDurations(stageDurations.heavyAuditMs)}, buyAttemptMs=${summarizeDurations(stageDurations.buyAttemptMs)}, concurrency=light:${lightConcurrency},heavy:${heavyConcurrency}, backpressure=${(ctx.scanBackpressureFactor || 1).toFixed(2)}`,
     'debug',
     { console: false }
   );
@@ -454,8 +478,12 @@ export async function scanForCandidates(
 /**
  * Schedules a pullback recheck for a token that is currently at the top.
  */
-export function schedulePullbackRecheck(ctx: Context, evaluation: any, oldEntry: any): void {
-  const entry = {
+export function schedulePullbackRecheck(
+  ctx: Context,
+  evaluation: EvaluationResult,
+  oldEntry: RecheckItem | null
+): void {
+  const entry: RecheckItem = {
     ...(oldEntry || {}),
     mint: evaluation.token.id,
     tokenSnapshot: evaluation.token,
@@ -472,8 +500,8 @@ export function schedulePullbackRecheck(ctx: Context, evaluation: any, oldEntry:
  */
 export function scheduleRecheckEligibleWaitlist(
   ctx: Context,
-  evaluation: any,
-  oldEntry: any,
+  evaluation: EvaluationResult,
+  oldEntry: RecheckItem | null,
   options: { lowHolderWaitlist?: boolean } = {}
 ): void {
   const { config, store } = ctx;
@@ -483,7 +511,7 @@ export function scheduleRecheckEligibleWaitlist(
         Math.random() * (config.borderlineRecheckMaxDelayMs - config.borderlineRecheckMinDelayMs) +
           config.borderlineRecheckMinDelayMs
       );
-  const entry = {
+  const entry: RecheckItem = {
     ...(oldEntry || {}),
     mint: evaluation.token.id,
     tokenSnapshot: evaluation.token,
@@ -499,7 +527,7 @@ export function scheduleRecheckEligibleWaitlist(
 /**
  * Schedules a survival delay for a newly discovered token.
  */
-export function scheduleSurvivalDelay(ctx: Context, evaluation: any): void {
+export function scheduleSurvivalDelay(ctx: Context, evaluation: EvaluationResult): void {
   const { config, store } = ctx;
   const score = evaluation.candidateScore || 0;
   let delayMs;
@@ -511,7 +539,7 @@ export function scheduleSurvivalDelay(ctx: Context, evaluation: any): void {
     delayMs = config.survivalDelaySeconds * 1000;
   }
 
-  const entry = {
+  const entry: RecheckItem = {
     mint: evaluation.token.id,
     tokenSnapshot: evaluation.token,
     attempts: 0,
@@ -541,7 +569,11 @@ export function scheduleSurvivalDelay(ctx: Context, evaluation: any): void {
 /**
  * Schedules a final security audit for a token that passed survival delay.
  */
-export function scheduleFinalAudit(ctx: Context, evaluation: any, oldEntry: any): void {
+export function scheduleFinalAudit(
+  ctx: Context,
+  evaluation: EvaluationResult,
+  oldEntry: RecheckItem
+): void {
   const { config, store } = ctx;
   const score = evaluation.candidateScore || 0;
   let delayMs;
@@ -551,7 +583,7 @@ export function scheduleFinalAudit(ctx: Context, evaluation: any, oldEntry: any)
     delayMs = config.finalAuditSeconds * 1000;
   }
 
-  const entry = {
+  const entry: RecheckItem = {
     ...oldEntry,
     nextEligibleAt: new Date(Date.now() + delayMs).toISOString(),
     isSurvivalWait: false,
@@ -592,14 +624,14 @@ export function scheduleIndexingLagRetry(
   }
 
   const delayMs = Math.max(1000, Math.floor(Number(config.rpcIndexingRetryDelayMs || 15000)));
-  const entry = {
-    ...(existing || {}),
+  const entry: RecheckItem = {
+    ...(existing || { mint }),
     mint,
     tokenSnapshot: token || existing?.tokenSnapshot,
     attempts: Number(existing?.attempts || 0) + 1,
     nextEligibleAt: new Date(Date.now() + delayMs).toISOString(),
     indexingLagRetries: currentRetries + 1,
-  } as any;
+  };
   store.upsertRecheckEntry(entry);
   log(
     config.logFile,
@@ -618,15 +650,15 @@ export function getDueCandidateRechecks(ctx: Context): RecheckItem[] {
     (e) =>
       !e.scheduledTime ||
       e.scheduledTime <= now ||
-      (e as any).nextEligibleAt === undefined ||
-      new Date((e as any).nextEligibleAt).getTime() <= now
+      e.nextEligibleAt === undefined ||
+      new Date(e.nextEligibleAt).getTime() <= now
   );
 }
 
 /**
  * Refreshes market snapshots with new data and purges stale ones.
  */
-export function refreshMarketSnapshots(ctx: Context, launches: any[]): void {
+export function refreshMarketSnapshots(ctx: Context, launches: TokenMetadata[]): void {
   const { state, store } = ctx;
   const now = Date.now();
   for (const t of launches)

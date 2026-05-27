@@ -19,37 +19,51 @@ import {
   AdjustedThresholds,
 } from '../../types/index.js';
 
+interface PricePoint {
+  price: number;
+  timestamp: number;
+}
+
 /**
  * Retrieves the profile for a given launchpad.
  * @param launchpad - The name of the launchpad.
  * @returns The launchpad profile object.
  */
-export function getLaunchpadProfile(launchpad: any): any {
+export function getLaunchpadProfile(launchpad: unknown): LaunchpadProfile & { name: string } {
   const normalized =
     typeof launchpad === 'string' && launchpad.trim() ? launchpad.trim().toLowerCase() : 'unknown';
   const defaultProfiles: Record<string, LaunchpadProfile> = DEFAULT_LAUNCHPAD_PROFILES;
   const profile = defaultProfiles[normalized];
   if (!profile) {
-    return { name: 'unknown' };
+    return {
+      name: 'unknown',
+      scoreBonus: 0,
+      liquidityMultiplier: 1,
+      holderMultiplier: 1,
+      buysMultiplier: 1,
+      minPoolAgeSeconds: 0,
+    };
   }
   return { name: normalized, ...profile };
 }
 
-function finiteNumber(value: any, fallback = 0): number {
+function finiteNumber(value: unknown, fallback = 0): number {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : fallback;
 }
 
-function normalizePricePoint(point: any): any | null {
+function normalizePricePoint(point: Record<string, unknown>): PricePoint | null {
   const price = finiteNumber(point?.price, NaN);
   const timestamp = finiteNumber(point?.timestamp, NaN);
   if (!(price > 0) || !Number.isFinite(timestamp)) return null;
-  return { ...point, price, timestamp };
+  return { price, timestamp };
 }
 
-function getValidPriceHistory(priceHistory: any[]): any[] {
+function getValidPriceHistory(priceHistory: unknown[]): PricePoint[] {
   if (!Array.isArray(priceHistory)) return [];
-  return priceHistory.map(normalizePricePoint).filter(Boolean);
+  return priceHistory
+    .map((p) => normalizePricePoint(p as Record<string, unknown>))
+    .filter((p): p is PricePoint => p !== null);
 }
 
 /**
@@ -57,7 +71,7 @@ function getValidPriceHistory(priceHistory: any[]): any[] {
  */
 export function getLaunchpadAdjustedThresholds(
   ctx: Context,
-  profile: LaunchpadProfile
+  profile: LaunchpadProfile & { name: string }
 ): AdjustedThresholds {
   const defaults = {
     minLiquidityUsd: ctx.config.minLiquidityUsd,
@@ -65,7 +79,7 @@ export function getLaunchpadAdjustedThresholds(
     minBuys5m: ctx.config.minBuys5m,
     minPoolAgeSeconds: ctx.config.minPoolAgeSeconds,
   };
-  if (!profile || (profile as any).name === 'unknown') return defaults;
+  if (!profile || profile.name === 'unknown') return defaults;
   return {
     minLiquidityUsd: defaults.minLiquidityUsd * (profile.liquidityMultiplier || 1),
     minHolderCount: defaults.minHolderCount * (profile.holderMultiplier || 1),
@@ -136,7 +150,8 @@ export function looksLikeMemecoin(ctx: Context, token: TokenMetadata): boolean {
  * @returns The count of social links.
  */
 export function countSocialLinks(token: TokenMetadata): number {
-  return ['website', 'twitter', 'telegram'].reduce((count, key) => count + (token[key] ? 1 : 0), 0);
+  const fields: (keyof TokenMetadata)[] = ['website', 'twitter', 'telegram'];
+  return fields.reduce((count, key) => count + (token[key] ? 1 : 0), 0);
 }
 
 /**
@@ -176,13 +191,13 @@ export async function evaluateCandidate(
   ctx: Context,
   token: TokenMetadata,
   highestSeenPriceUsd: number | null = null,
-  priceHistory: any[] = [],
+  priceHistory: unknown[] = [],
   priceAtStartOfDelay: number | null = null,
   liquidityAtStartOfDelay: number | null = null,
-  tapeAtStart: any = null,
-  tapeHistory: any[] = [],
+  tapeAtStart: { buys: number; sells: number } | null = null,
+  tapeHistory: unknown[] = [],
   depth = 'cheap',
-  priority: any = null
+  priority: number | undefined = undefined
 ): Promise<EvaluationResult> {
   const blockers: string[] = [];
   const rejectionReasons: { code: string; recheckEligible: boolean }[] = [];
@@ -280,10 +295,15 @@ export async function evaluateCandidate(
         }
         if (Array.isArray(tapeHistory) && tapeHistory.length >= 2) {
           const midPointTime = startTime + totalDuration / 2;
-          const tapeAtStartSnapshot = tapeHistory[0]!;
+          const tapeAtStartSnapshot = tapeHistory[0] as { buys: number; timestamp: number };
           const tapeAtMidSnapshot =
-            tapeHistory.find((t) => t.timestamp >= midPointTime) ||
-            tapeHistory[Math.floor(tapeHistory.length / 2)]!;
+            (tapeHistory as { buys: number; timestamp: number }[]).find(
+              (t) => t.timestamp >= midPointTime
+            ) ||
+            (tapeHistory[Math.floor(tapeHistory.length / 2)] as {
+              buys: number;
+              timestamp: number;
+            });
           const buysFirstHalf = tapeAtMidSnapshot.buys - tapeAtStartSnapshot.buys;
           const buysSecondHalf = Number(token.stats5m?.numBuys || 0) - tapeAtMidSnapshot.buys;
           if (
@@ -412,7 +432,10 @@ export async function evaluateCandidate(
     addBlocker('Verified tokens are disabled by config.', 'verified-token-disabled');
   if (token.audit?.isSus)
     addBlocker('Jupiter audit marks token as suspicious.', 'jupiter-audit-suspicious');
-  if (Number(token.audit?.topHoldersPercentage || 0) > ctx.config.maxAuditTopHoldersPct) {
+  if (
+    token.audit?.topHoldersPercentage != null &&
+    token.audit.topHoldersPercentage > ctx.config.maxAuditTopHoldersPct
+  ) {
     addBlocker(
       `Jupiter audit top holders ${token.audit.topHoldersPercentage}% exceeds ${ctx.config.maxAuditTopHoldersPct}%.`,
       'jupiter-audit-top-holders'
@@ -461,7 +484,7 @@ export async function evaluateCandidate(
       notes,
       candidateScore: entryScore,
       volatilityScaler,
-      launchpadProfile: launchpadProfile as any,
+      launchpadProfile,
       adjustedThresholds: thresholds,
       token,
     };
@@ -475,7 +498,7 @@ export async function evaluateCandidate(
       notes,
       candidateScore: entryScore,
       volatilityScaler,
-      launchpadProfile: launchpadProfile as any,
+      launchpadProfile,
       adjustedThresholds: thresholds,
       token,
     };
@@ -531,15 +554,15 @@ export async function evaluateCandidate(
   const owners = Array.from(
     new Set(
       (mintSignals.topAccounts || [])
-        .map((a: any) => a.owner)
-        .filter((o: any) => o && !BURN_OWNERS.has(o))
+        .map((a) => a.owner)
+        .filter((o): o is string => o !== null && !BURN_OWNERS.has(o))
     )
-  ) as string[];
+  );
   if (owners.length > 0) {
     const malicious = await audit.fetchGoPlusAddressSignals(ctx, owners);
     if (malicious.length > 0)
       addBlocker(
-        `Malicious owners flagged by GoPlus: ${malicious.map((m: any) => m.address).join(', ')}`,
+        `Malicious owners flagged by GoPlus: ${malicious.map((m) => m.address).join(', ')}`,
         'goplus-malicious-owner'
       );
   }
@@ -562,7 +585,7 @@ export async function evaluateCandidate(
     notes,
     candidateScore: entryScore,
     volatilityScaler,
-    launchpadProfile: launchpadProfile as any,
+    launchpadProfile,
     adjustedThresholds: thresholds,
     token,
     mintSignals,

@@ -1,6 +1,6 @@
 {
   "name": "veloci-buy",
-  "version": "2.3.0",
+  "version": "2.5.0",
   "private": true,
   "description": "High-performance Solana discovery and execution engine with Jupiter execution and staged audit filters.",
   "main": "bot.js",
