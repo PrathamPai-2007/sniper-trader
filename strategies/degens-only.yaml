@@ -1,0 +1,29 @@
+name: 'Degens Only'
+description: 'High-risk, high-reward strategy for early-stage memecoins'
+minLiquidityUsd: 100
+minHolderCount: 5
+maxRecheckAttempts: 3
+minCandidateScore: 50
+stopLossPct: 0.3
+takeProfitMultiples: [2, 5, 10]
+survivalDelaySeconds: 5
+maxOpenPositions: 10
+minSurvivalMomentum: 1.05
+minBreakoutMultiplier: 1.02
+maxPriceDumpPct: 25
+maxSurvivalGrowthPct: 1000
+maxSellPressureIncreasePct: 200
+maxAuditTopHoldersPct: 80
+minMomentumConsistency: 0.5
+minAccelerationFactor: 0.2
+maxConcurrentAudits: 50
+scanParallelismLight: 30
+scanParallelismHeavy: 10
+ownerAuditParallelism: 5
+priceFallbackParallelism: 10
+parallelismMinFactor: 0.4
+errorRateWindow: 50
+backpressureErrorRateThreshold: 0.4
+mintSignalMaxAttempts: 1
+mintSignalRetryDelayMs: 200
+rpcIndexingRetryDelayMs: 2000

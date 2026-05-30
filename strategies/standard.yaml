@@ -1,0 +1,29 @@
+name: 'Standard Aggressive'
+description: 'Standard balanced strategy for mid-cap Solana memecoins'
+minLiquidityUsd: 500
+minHolderCount: 12
+maxRecheckAttempts: 6
+minCandidateScore: 64
+stopLossPct: 0.18
+takeProfitMultiples: [1.3, 2.1]
+survivalDelaySeconds: 20
+maxOpenPositions: 5
+minSurvivalMomentum: 1.13
+minBreakoutMultiplier: 1.05
+maxPriceDumpPct: 18
+maxSurvivalGrowthPct: 450
+maxSellPressureIncreasePct: 110
+maxAuditTopHoldersPct: 65
+minMomentumConsistency: 0.65
+minAccelerationFactor: 0.3
+maxConcurrentAudits: 20
+scanParallelismLight: 10
+scanParallelismHeavy: 4
+ownerAuditParallelism: 3
+priceFallbackParallelism: 6
+parallelismMinFactor: 0.55
+errorRateWindow: 30
+backpressureErrorRateThreshold: 0.22
+mintSignalMaxAttempts: 2
+mintSignalRetryDelayMs: 500
+rpcIndexingRetryDelayMs: 5000

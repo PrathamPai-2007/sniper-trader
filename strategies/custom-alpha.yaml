@@ -1,0 +1,29 @@
+name: 'My Custom Strategy'
+description: 'A completely custom strategy for testing dynamic naming'
+minLiquidityUsd: 777
+minHolderCount: 7
+maxRecheckAttempts: 7
+minCandidateScore: 77
+stopLossPct: 0.07
+takeProfitMultiples: [7.7]
+survivalDelaySeconds: 7
+maxOpenPositions: 7
+minSurvivalMomentum: 1.07
+minBreakoutMultiplier: 1.07
+maxPriceDumpPct: 7
+maxSurvivalGrowthPct: 700
+maxSellPressureIncreasePct: 70
+maxAuditTopHoldersPct: 70
+minMomentumConsistency: 0.7
+minAccelerationFactor: 0.7
+maxConcurrentAudits: 7
+scanParallelismLight: 7
+scanParallelismHeavy: 7
+ownerAuditParallelism: 7
+priceFallbackParallelism: 7
+parallelismMinFactor: 0.7
+errorRateWindow: 77
+backpressureErrorRateThreshold: 0.77
+mintSignalMaxAttempts: 7
+mintSignalRetryDelayMs: 700
+rpcIndexingRetryDelayMs: 7000

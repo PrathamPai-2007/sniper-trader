@@ -1,6 +1,5 @@
 # Dependencies
 node_modules/
-package-lock.json
 
 # Runtime artifacts
 logs/
@@ -30,6 +29,7 @@ GEMINI.md
 AGENTS.md
 MEMORY.md
 MEMORY_*.md
+plans/
 
 # Build and coverage output
 dist/

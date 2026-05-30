@@ -17,6 +17,7 @@ import {
   LaunchpadProfile,
   EvaluationResult,
   AdjustedThresholds,
+  MintSignals,
 } from '../../types/index.js';
 
 interface PricePoint {
@@ -47,11 +48,22 @@ export function getLaunchpadProfile(launchpad: unknown): LaunchpadProfile & { na
   return { name: normalized, ...profile };
 }
 
-function finiteNumber(value: unknown, fallback = 0): number {
+/**
+ * Normalizes a potential numeric value, falling back to a default if invalid.
+ * @param value - The value to normalize.
+ * @param fallback - The fallback value if normalization fails (default: 0).
+ * @returns A finite number.
+ */
+export function finiteNumber(value: unknown, fallback = 0): number {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : fallback;
 }
 
+/**
+ * Normalizes a raw price point object into a validated PricePoint.
+ * @param point - The raw price point object.
+ * @returns A validated PricePoint or null if invalid.
+ */
 function normalizePricePoint(point: Record<string, unknown>): PricePoint | null {
   const price = finiteNumber(point?.price, NaN);
   const timestamp = finiteNumber(point?.timestamp, NaN);
@@ -59,6 +71,11 @@ function normalizePricePoint(point: Record<string, unknown>): PricePoint | null 
   return { price, timestamp };
 }
 
+/**
+ * Filters and normalizes a price history array.
+ * @param priceHistory - The raw price history array.
+ * @returns An array of validated PricePoints.
+ */
 function getValidPriceHistory(priceHistory: unknown[]): PricePoint[] {
   if (!Array.isArray(priceHistory)) return [];
   return priceHistory
@@ -185,7 +202,139 @@ export function isSlightlyBelowThreshold(
 }
 
 /**
+ * Applies advanced momentum filters to a token candidate.
+ * @param ctx - The application context.
+ * @param priceHistory - Normalized price history.
+ * @param currentPrice - Current token price in USD.
+ * @param now - Current timestamp.
+ * @param startDelayPrice - Price at the start of the survival delay.
+ * @param token - Token metadata.
+ * @param tapeHistory - Transaction tape history.
+ * @param addBlocker - Callback to add a rejection reason.
+ */
+function applyMomentumFilters(
+  ctx: Context,
+  priceHistory: PricePoint[],
+  currentPrice: number,
+  now: number,
+  startDelayPrice: number,
+  token: TokenMetadata,
+  tapeHistory: unknown[],
+  addBlocker: (message: string, code: string, recheckEligible?: boolean) => void
+): void {
+  if (priceHistory.length < 6) return;
+
+  const startTime = priceHistory[0]!.timestamp;
+  const totalDuration = now - startTime;
+
+  if (totalDuration < ctx.config.earlyPerformanceGuardSeconds * 1000) return;
+
+  const segDuration = totalDuration / 3;
+  const s1Time = startTime + segDuration;
+  const s2Time = startTime + 2 * segDuration;
+  const pStart = startDelayPrice;
+
+  const pS1 = priceHistory.find((h) => h.timestamp >= s1Time)?.price || pStart;
+  const pS2 = priceHistory.find((h) => h.timestamp >= s2Time)?.price || pS1;
+
+  const growthS1 = (pS1 - pStart) / pStart;
+  const growthS3 = (currentPrice - pS2) / pS2;
+
+  // Stall Filter
+  if (growthS1 > 0.05) {
+    const stabilityFactor = growthS3 / growthS1;
+    const minAccel = ctx.config.minAccelerationFactor ?? MOMENTUM_FILTERS.minAccelerationFactor;
+    if (stabilityFactor < minAccel) {
+      addBlocker(
+        `Momentum stalling (Stall Filter): segment 3 growth (${(growthS3 * 100).toFixed(1)}%) is too low vs segment 1 (${(growthS1 * 100).toFixed(1)}%). factor=${stabilityFactor.toFixed(2)}`,
+        'momentum-stalling'
+      );
+    }
+  }
+
+  // Tape Filter (Buy velocity decay)
+  if (Array.isArray(tapeHistory) && tapeHistory.length >= 2) {
+    const midPointTime = startTime + totalDuration / 2;
+    const tapeAtStartSnapshot = tapeHistory[0] as { buys: number; timestamp: number };
+    const tapeAtMidSnapshot =
+      (tapeHistory as { buys: number; timestamp: number }[]).find(
+        (t) => t.timestamp >= midPointTime
+      ) ||
+      (tapeHistory[Math.floor(tapeHistory.length / 2)] as {
+        buys: number;
+        timestamp: number;
+      });
+
+    const buysFirstHalf = tapeAtMidSnapshot.buys - tapeAtStartSnapshot.buys;
+    const buysSecondHalf = Number(token.stats5m?.numBuys || 0) - tapeAtMidSnapshot.buys;
+
+    if (
+      buysFirstHalf > MOMENTUM_FILTERS.minBuysFirstHalf &&
+      buysSecondHalf < buysFirstHalf * MOMENTUM_FILTERS.buyVelocityDecayFactor
+    ) {
+      addBlocker(
+        `Buy velocity decay (Tape Filter): second-half buys (${buysSecondHalf}) dropped significantly vs first-half (${buysFirstHalf}).`,
+        'buy-velocity-decay'
+      );
+    }
+  }
+
+  // Flatline Filter (Price exhaustion)
+  const midPointTime = startTime + totalDuration / 2;
+  const pMid = priceHistory.find((h) => h.timestamp >= midPointTime)?.price || currentPrice;
+  const growthFirstHalf = (pMid - pStart) / pStart;
+
+  if (growthFirstHalf > 0.2) {
+    const recentSnapshots = priceHistory.slice(-8);
+    if (recentSnapshots.length >= 5) {
+      const prices = recentSnapshots.map((s) => s.price).concat(currentPrice);
+      const minP = Math.min(...prices);
+      const maxP = Math.max(...prices);
+      const rangePct = minP > 0 ? ((maxP - minP) / minP) * 100 : Infinity;
+      const maxExhaustion =
+        ctx.config.maxExhaustionRangePct ?? MOMENTUM_FILTERS.maxExhaustionRangePct;
+      if (Number.isFinite(rangePct) && rangePct < maxExhaustion) {
+        addBlocker(
+          `Price exhaustion (Flatline Filter): vertical spike followed by stagnant range (${rangePct.toFixed(2)}%) at the peak.`,
+          'price-exhaustion'
+        );
+      }
+    }
+  }
+
+  // Consistency Filter
+  const snapshots = priceHistory.concat({ price: currentPrice, timestamp: now });
+  let greenSnapshots = 0;
+  for (let i = 1; i < snapshots.length; i++) {
+    if (snapshots[i]!.price > snapshots[i - 1]!.price) greenSnapshots++;
+  }
+  const consistencyRatio = greenSnapshots / (snapshots.length - 1);
+  const minConsistency =
+    ctx.config.minMomentumConsistency ?? MOMENTUM_FILTERS.minMomentumConsistency;
+  if (consistencyRatio < minConsistency) {
+    addBlocker(
+      `Choppy momentum: ${(consistencyRatio * 100).toFixed(1)}% green (min ${(minConsistency * 100).toFixed(0)}% required).`,
+      'choppy-momentum'
+    );
+  }
+}
+
+/**
  * Performs a multi-stage evaluation of a token candidate.
+ * Applies strategy filters including momentum, liquidity, volume, and audits.
+ *
+ * @param ctx - The application context.
+ * @param token - The token metadata to evaluate.
+ * @param highestSeenPriceUsd - The highest price observed for this token.
+ * @param priceHistory - Historical price data.
+ * @param priceAtStartOfDelay - Price when the evaluation delay started.
+ * @param liquidityAtStartOfDelay - Liquidity when the evaluation delay started.
+ * @param tapeAtStart - Transaction tape (buys/sells) at the start of delay.
+ * @param tapeHistory - Historical transaction tape data.
+ * @param depth - Depth of evaluation ('cheap' skips heavy audits).
+ * @param priority - RPC priority level.
+ * @param preFetchedSignals - Optional pre-fetched mint signals to optimize performance.
+ * @returns An evaluation result with approval status and reasons.
  */
 export async function evaluateCandidate(
   ctx: Context,
@@ -197,7 +346,8 @@ export async function evaluateCandidate(
   tapeAtStart: { buys: number; sells: number } | null = null,
   tapeHistory: unknown[] = [],
   depth = 'cheap',
-  priority: number | undefined = undefined
+  priority: number | undefined = undefined,
+  preFetchedSignals?: MintSignals
 ): Promise<EvaluationResult> {
   const blockers: string[] = [];
   const rejectionReasons: { code: string; recheckEligible: boolean }[] = [];
@@ -219,6 +369,7 @@ export async function evaluateCandidate(
   const organicScore = finiteNumber(token.organicScore);
   const buys5m = finiteNumber(token.stats5m?.numBuys);
   const sells5m = finiteNumber(token.stats5m?.numSells);
+
   const validPriceHistory = getValidPriceHistory(priceHistory);
   const launchpadProfile = getLaunchpadProfile(token.launchpad);
   const thresholds = getLaunchpadAdjustedThresholds(ctx, launchpadProfile);
@@ -237,12 +388,12 @@ export async function evaluateCandidate(
     rejectionReasons.push({ code, recheckEligible });
   };
 
+  // Liquidity Drain Guard
   if (liquidityAtStartOfDelay != null && liquidityAtStartOfDelay > 0) {
-    const currentLiquidity = Number(token.liquidity || 0);
-    const liqDropRatio = 1 - currentLiquidity / liquidityAtStartOfDelay;
+    const liqDropRatio = 1 - liquidity / liquidityAtStartOfDelay;
     if (liqDropRatio > ctx.config.maxLiquidityDrawdownPct / 100) {
       addBlocker(
-        `Liquidity is draining: ${formatUsd(currentLiquidity)} is ${ratioToPercentString(liqDropRatio)} below start ${formatUsd(liquidityAtStartOfDelay)}.`,
+        `Liquidity is draining: ${formatUsd(liquidity)} is ${ratioToPercentString(liqDropRatio)} below start ${formatUsd(liquidityAtStartOfDelay)}.`,
         'liquidity-draining'
       );
     }
@@ -253,6 +404,7 @@ export async function evaluateCandidate(
     const currentPrice = usdPrice;
     const momentum = currentPrice / startDelayPrice;
     const growthPct = (momentum - 1) * 100;
+
     if (growthPct > ctx.config.maxSurvivalGrowthPct) {
       addBlocker(
         `Parabolic growth detected: ${growthPct.toFixed(1)}% exceeds limit of ${ctx.config.maxSurvivalGrowthPct}%.`,
@@ -272,91 +424,28 @@ export async function evaluateCandidate(
       );
     }
 
-    if (validPriceHistory.length >= 6) {
-      const startTime = validPriceHistory[0]!.timestamp;
-      const totalDuration = now - startTime;
-      if (totalDuration >= ctx.config.earlyPerformanceGuardSeconds * 1000) {
-        const segDuration = totalDuration / 3;
-        const s1Time = startTime + segDuration;
-        const s2Time = startTime + 2 * segDuration;
-        const pStart = startDelayPrice;
-        const pS1 = validPriceHistory.find((h) => h.timestamp >= s1Time)?.price || pStart;
-        const pS2 = validPriceHistory.find((h) => h.timestamp >= s2Time)?.price || pS1;
-        const growthS1 = (pS1 - pStart) / pStart;
-        const growthS3 = (currentPrice - pS2) / pS2;
-        if (growthS1 > 0.05) {
-          const stabilityFactor = growthS3 / growthS1;
-          if (stabilityFactor < MOMENTUM_FILTERS.minAccelerationFactor) {
-            addBlocker(
-              `Momentum stalling (Stall Filter): segment 3 growth (${(growthS3 * 100).toFixed(1)}%) is too low vs segment 1 (${(growthS1 * 100).toFixed(1)}%). factor=${stabilityFactor.toFixed(2)}`,
-              'momentum-stalling'
-            );
-          }
-        }
-        if (Array.isArray(tapeHistory) && tapeHistory.length >= 2) {
-          const midPointTime = startTime + totalDuration / 2;
-          const tapeAtStartSnapshot = tapeHistory[0] as { buys: number; timestamp: number };
-          const tapeAtMidSnapshot =
-            (tapeHistory as { buys: number; timestamp: number }[]).find(
-              (t) => t.timestamp >= midPointTime
-            ) ||
-            (tapeHistory[Math.floor(tapeHistory.length / 2)] as {
-              buys: number;
-              timestamp: number;
-            });
-          const buysFirstHalf = tapeAtMidSnapshot.buys - tapeAtStartSnapshot.buys;
-          const buysSecondHalf = Number(token.stats5m?.numBuys || 0) - tapeAtMidSnapshot.buys;
-          if (
-            buysFirstHalf > MOMENTUM_FILTERS.minBuysFirstHalf &&
-            buysSecondHalf < buysFirstHalf * MOMENTUM_FILTERS.buyVelocityDecayFactor
-          ) {
-            addBlocker(
-              `Buy velocity decay (Tape Filter): second-half buys (${buysSecondHalf}) dropped significantly vs first-half (${buysFirstHalf}).`,
-              'buy-velocity-decay'
-            );
-          }
-        }
-        const midPointTime = startTime + totalDuration / 2;
-        const pMid =
-          validPriceHistory.find((h) => h.timestamp >= midPointTime)?.price || currentPrice;
-        const growthFirstHalf = (pMid - pStart) / pStart;
-        if (growthFirstHalf > 0.2) {
-          const recentSnapshots = validPriceHistory.slice(-8);
-          if (recentSnapshots.length >= 5) {
-            const prices = recentSnapshots.map((s) => s.price).concat(currentPrice);
-            const minP = Math.min(...prices);
-            const maxP = Math.max(...prices);
-            const rangePct = minP > 0 ? ((maxP - minP) / minP) * 100 : Infinity;
-            if (Number.isFinite(rangePct) && rangePct < MOMENTUM_FILTERS.maxExhaustionRangePct)
-              addBlocker(
-                `Price exhaustion (Flatline Filter): vertical spike followed by stagnant range (${rangePct.toFixed(2)}%) at the peak.`,
-                'price-exhaustion'
-              );
-          }
-        }
-        const snapshots = validPriceHistory.concat({ price: currentPrice, timestamp: now });
-        let greenSnapshots = 0;
-        for (let i = 1; i < snapshots.length; i++)
-          if (snapshots[i]!.price > snapshots[i - 1]!.price) greenSnapshots++;
-        const consistencyRatio = greenSnapshots / (snapshots.length - 1);
-        if (consistencyRatio < MOMENTUM_FILTERS.minMomentumConsistency)
-          addBlocker(
-            `Choppy momentum: ${(consistencyRatio * 100).toFixed(1)}% green (min ${(MOMENTUM_FILTERS.minMomentumConsistency * 100).toFixed(0)}% required).`,
-            'choppy-momentum'
-          );
-      }
-    }
+    applyMomentumFilters(
+      ctx,
+      validPriceHistory,
+      currentPrice,
+      now,
+      startDelayPrice,
+      token,
+      tapeHistory,
+      addBlocker
+    );
   }
 
   const highestSeenPrice = finiteNumber(highestSeenPriceUsd, NaN);
   if (highestSeenPrice > 0) {
     const currentPrice = usdPrice;
     const dropRatio = 1 - currentPrice / highestSeenPrice;
-    if (dropRatio > ctx.config.maxPriceDumpPct / 100)
+    if (dropRatio > ctx.config.maxPriceDumpPct / 100) {
       addBlocker(
         `Price is dumping: ${formatUsd(currentPrice)} is ${ratioToPercentString(dropRatio)} below peak ${formatUsd(highestSeenPrice)}.`,
         'price-dumping'
       );
+    }
 
     if (startDelayPrice > 0) {
       const growthSinceStart = (currentPrice / startDelayPrice - 1) * 100;
@@ -372,6 +461,7 @@ export async function evaluateCandidate(
     }
   }
 
+  // Sell Pressure Guard
   if (tapeAtStart) {
     const startBuys = finiteNumber(tapeAtStart.buys);
     const startSells = finiteNumber(tapeAtStart.sells);
@@ -381,23 +471,27 @@ export async function evaluateCandidate(
       const effectiveBuysDelta = Math.max(1, buysDelta);
       const sellRatio = sellsDelta / effectiveBuysDelta;
       const sellPressureIncrease = (sellsDelta / Math.max(1, startSells)) * 100;
-      if (sellRatio > 0.8 && sellPressureIncrease > ctx.config.maxSellPressureIncreasePct)
+      if (sellRatio > 0.8 && sellPressureIncrease > ctx.config.maxSellPressureIncreasePct) {
         addBlocker(
           `High selling pressure: Sells increased by ${sellPressureIncrease.toFixed(1)}% during delay (Sell/Buy ratio: ${sellRatio.toFixed(2)}).`,
           'high-sell-pressure'
         );
+      }
     }
   }
 
+  // Static Heuristics & Thresholds
   if (!looksLikeMemecoin(ctx, token)) addBlocker('Does not match heuristic.', 'not-memecoin');
   if (!(usdPrice > 0)) addBlocker('No price.', 'missing-price');
-  if (!Number.isFinite(liquidity) || liquidity < thresholds.minLiquidityUsd)
+  if (!Number.isFinite(liquidity) || liquidity < thresholds.minLiquidityUsd) {
     addBlocker(
       `Low liquidity ${formatUsd(liquidity)}.`,
       'low-liquidity',
       isSlightlyBelowThreshold(ctx, liquidity, thresholds.minLiquidityUsd)
     );
-  if (Number.isFinite(fdv) && fdv > 0 && Number.isFinite(liquidity) && liquidity > 0) {
+  }
+
+  if (fdv > 0 && liquidity > 0) {
     const fdvToLiquidity = fdv / liquidity;
     if (fdvToLiquidity > ctx.config.maxFdvToLiquidity) {
       addBlocker(
@@ -406,32 +500,38 @@ export async function evaluateCandidate(
       );
     }
   }
-  if (
-    !reducedHistoricalSnapshot &&
-    (!Number.isFinite(holderCount) || holderCount < thresholds.minHolderCount)
-  )
-    addBlocker(
-      `Low holders ${holderCount}.`,
-      'low-holders',
-      isSlightlyBelowThreshold(ctx, holderCount, thresholds.minHolderCount)
-    );
-  if (
-    !reducedHistoricalSnapshot &&
-    (!Number.isFinite(organicScore) || organicScore < ctx.config.minOrganicScore)
-  )
-    addBlocker(`Low organic score ${organicScore}.`, 'low-organic-score');
-  if (!reducedHistoricalSnapshot && buys5m < thresholds.minBuys5m)
-    addBlocker(
-      `Low 5m buys ${buys5m}.`,
-      'low-buys',
-      isSlightlyBelowThreshold(ctx, buys5m, thresholds.minBuys5m)
-    );
-  if (socialLinks < ctx.config.minSocialLinks)
+
+  if (!reducedHistoricalSnapshot) {
+    if (!Number.isFinite(holderCount) || holderCount < thresholds.minHolderCount) {
+      addBlocker(
+        `Low holders ${holderCount}.`,
+        'low-holders',
+        isSlightlyBelowThreshold(ctx, holderCount, thresholds.minHolderCount)
+      );
+    }
+    if (!Number.isFinite(organicScore) || organicScore < ctx.config.minOrganicScore) {
+      addBlocker(`Low organic score ${organicScore}.`, 'low-organic-score');
+    }
+    if (buys5m < thresholds.minBuys5m) {
+      addBlocker(
+        `Low 5m buys ${buys5m}.`,
+        'low-buys',
+        isSlightlyBelowThreshold(ctx, buys5m, thresholds.minBuys5m)
+      );
+    }
+  }
+
+  if (socialLinks < ctx.config.minSocialLinks) {
     addBlocker(`Low social links ${socialLinks}.`, 'low-social-links');
-  if (!ctx.config.allowVerifiedTokens && token.isVerified)
+  }
+  if (!ctx.config.allowVerifiedTokens && token.isVerified) {
     addBlocker('Verified tokens are disabled by config.', 'verified-token-disabled');
-  if (token.audit?.isSus)
+  }
+
+  // Audit Results (from Metadata)
+  if (token.audit?.isSus) {
     addBlocker('Jupiter audit marks token as suspicious.', 'jupiter-audit-suspicious');
+  }
   if (
     token.audit?.topHoldersPercentage != null &&
     token.audit.topHoldersPercentage > ctx.config.maxAuditTopHoldersPct
@@ -442,12 +542,18 @@ export async function evaluateCandidate(
     );
   }
 
+  // Age Checks
   if (ageSeconds != null) {
-    if (ageSeconds < thresholds.minPoolAgeSeconds)
+    if (ageSeconds < thresholds.minPoolAgeSeconds) {
       addBlocker(`Too new ${ageSeconds}s.`, 'too-new', true);
-    if (ageSeconds > ctx.config.maxCandidateAgeMinutes * 60)
+    }
+    if (ageSeconds > ctx.config.maxCandidateAgeMinutes * 60) {
       addBlocker(`Too old ${(ageSeconds / 60).toFixed(1)}m.`, 'too-old');
-  } else notes.push('Missing age data.');
+    }
+  } else {
+    notes.push('Missing age data.');
+  }
+
   if (reducedHistoricalSnapshot) {
     if (!(holderCount > 0)) notes.push('Historical backfill is missing holder count.');
     if (!Number.isFinite(Number(token.organicScore)))
@@ -456,6 +562,7 @@ export async function evaluateCandidate(
       notes.push('Historical backfill is missing 5m buy tape.');
   }
 
+  // Entry Score adjustment based on GMI
   if (!reducedHistoricalSnapshot) {
     let adjustedMinScore = ctx.config.minCandidateScore;
     if (typeof ctx.calculateGMI === 'function') {
@@ -504,26 +611,33 @@ export async function evaluateCandidate(
     };
   }
 
+  // Deep Audit
   const [mintSignals, goPlusSignals, bbSignals] = await Promise.all([
-    audit.getMintSignals(ctx, token.id, { priority }),
-    audit.fetchGoPlusTokenSignals(ctx, token.id),
-    audit.fetchBubbleMapsSignals(ctx, token.id),
+    preFetchedSignals
+      ? Promise.resolve(preFetchedSignals)
+      : audit.auditService.getMintSignals(ctx, token.id, { priority }),
+    audit.auditService.fetchGoPlusTokenSignals(ctx, token.id),
+    audit.auditService.fetchBubbleMapsSignals(ctx, token.id),
   ]);
 
-  if (mintSignals.mintAuthority)
+  if (mintSignals.mintAuthority) {
     addBlocker(`Mint authority set: ${mintSignals.mintAuthority}`, 'mint-authority-enabled');
-  if (mintSignals.freezeAuthority)
+  }
+  if (mintSignals.freezeAuthority) {
     addBlocker(`Freeze authority set: ${mintSignals.freezeAuthority}`, 'freeze-authority-enabled');
-  if (mintSignals.top1Share > ctx.config.maxTokenAccountTop1Pct / 100)
+  }
+  if (mintSignals.top1Share > ctx.config.maxTokenAccountTop1Pct / 100) {
     addBlocker(
       `High top1 concentration ${ratioToPercentString(mintSignals.top1Share)}.`,
       'top1-concentration'
     );
-  if (mintSignals.top5Share > ctx.config.maxTokenAccountTop5Pct / 100)
+  }
+  if (mintSignals.top5Share > ctx.config.maxTokenAccountTop5Pct / 100) {
     addBlocker(
       `High top5 concentration ${ratioToPercentString(mintSignals.top5Share)}.`,
       'top5-concentration'
     );
+  }
 
   if (goPlusSignals) {
     if (goPlusSignals.status === 'ok') {
@@ -551,6 +665,7 @@ export async function evaluateCandidate(
     }
   }
 
+  // Owner Audit
   const owners = Array.from(
     new Set(
       (mintSignals.topAccounts || [])
@@ -559,23 +674,26 @@ export async function evaluateCandidate(
     )
   );
   if (owners.length > 0) {
-    const malicious = await audit.fetchGoPlusAddressSignals(ctx, owners);
-    if (malicious.length > 0)
+    const malicious = await audit.auditService.fetchGoPlusAddressSignals(ctx, owners);
+    if (malicious.length > 0) {
       addBlocker(
         `Malicious owners flagged by GoPlus: ${malicious.map((m) => m.address).join(', ')}`,
         'goplus-malicious-owner'
       );
+    }
   }
 
+  // Re-entry Gate
   const retired = ctx.state.retiredMints.get(token.id);
   const lastExitPriceUsd = finiteNumber(retired?.lastExitPriceUsd, NaN);
   if (lastExitPriceUsd > 0 && usdPrice > 0) {
     const diff = ((usdPrice - lastExitPriceUsd) / lastExitPriceUsd) * 100;
-    if (diff > -ctx.config.reentryDipPct && diff < ctx.config.reentryBreakoutPct)
+    if (diff > -ctx.config.reentryDipPct && diff < ctx.config.reentryBreakoutPct) {
       addBlocker(
         `Price distance failed: ${diff.toFixed(2)}% in avoid range.`,
         'price-distance-gate'
       );
+    }
   }
 
   return {

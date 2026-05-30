@@ -9,6 +9,38 @@ export interface LaunchpadProfile {
   minPoolAgeSeconds: number;
 }
 
+export interface PresetStrategy {
+  name?: string;
+  description?: string;
+  minLiquidityUsd: number;
+  minHolderCount: number;
+  maxRecheckAttempts: number;
+  minCandidateScore: number;
+  stopLossPct: number;
+  takeProfitMultiples: number[];
+  survivalDelaySeconds: number;
+  maxOpenPositions: number;
+  minSurvivalMomentum: number;
+  minBreakoutMultiplier: number;
+  maxPriceDumpPct: number;
+  maxSurvivalGrowthPct: number;
+  maxSellPressureIncreasePct: number;
+  maxAuditTopHoldersPct: number;
+  minMomentumConsistency: number;
+  minAccelerationFactor: number;
+  maxConcurrentAudits: number;
+  scanParallelismLight: number;
+  scanParallelismHeavy: number;
+  ownerAuditParallelism: number;
+  priceFallbackParallelism: number;
+  parallelismMinFactor: number;
+  errorRateWindow: number;
+  backpressureErrorRateThreshold: number;
+  mintSignalMaxAttempts: number;
+  mintSignalRetryDelayMs: number;
+  rpcIndexingRetryDelayMs: number;
+}
+
 export interface Config {
   strategyName: string;
   rpcUrls: string[];
@@ -58,6 +90,7 @@ export interface Config {
   performanceStatsFile: string;
   metricsFile: string;
   mintsFile?: string;
+  stateFlushIntervalMs: number;
   minLiquidityUsd: number;
   minOrganicScore: number;
   minHolderCount: number;
@@ -129,13 +162,31 @@ export interface Config {
   priorityFeeMaxMicroLamports: number;
   priorityFeePanicMultiplier: number;
   priorityFeePercentile: number;
+  useJito: boolean;
+  jitoTipLamports: bigint;
+  jitoBlockEngineUrl: string;
+  jitoTipPercentile: number;
+  jitoTipFloorApiUrl: string;
+  jitoConfirmTimeoutMs: number;
+  jitoBundleRetryAttempts: number;
+  priorityFeeAccountLocal: boolean;
+  priorityFeeVolatilityMultiplier: number;
+  maxAutoSlippageRetry: number;
+  autoSlippageIncrementBps: number;
   useJupiterSdk: boolean;
+  inlineSwapSimulation: boolean;
+  backgroundAtaClose: boolean;
   closePositionsOnShutdown: boolean;
   privateKey: string;
   privateKeyPath: string;
+  keystorePath: string;
+  keystorePassword?: string;
   telegramBotToken: string;
   telegramChatId: string;
   discordWebhookUrl: string;
+  maxDailyDrawdownPct: number;
+  maxPositionsPerLaunchpad: number;
+  dynamicSizingEnabled: boolean;
 }
 
 export interface TokenMetadata {
@@ -359,9 +410,12 @@ export interface State {
   retiredMints: Map<string, RetiredMintEntry>;
   closedTrades: ClosedTrade[];
   metrics: StateMetrics;
+  sessionStartingSolBalanceLamports: string | null;
+  peakSessionSolBalanceLamports: string | null;
 }
 
 export interface StateStore {
+  state: State;
   load(stateFile: string): void;
   trackMint(mint: string): void;
   untrackMint(mint: string): void;
@@ -377,6 +431,7 @@ export interface StateStore {
   startCoolDown(mint: string, pUsd: number, expiresAt: number): void;
   updateMarketSnapshot(mint: string, snapshot: MarketSnapshot): void;
   calculateGMI(): number;
+  updateSessionPeakBalance(): void;
   updateLaunchHistory(launches: TokenMetadata[]): void;
   upsertRecheckEntry(entry: RecheckItem): void;
   removeRecheckEntry(mint: string): void;
@@ -460,10 +515,21 @@ export interface Context {
   rpcSubscriptions: RpcSubscriptions<SolanaRpcSubscriptionsApi>;
   rpcSubscriptionPool: RpcSubscriptions<SolanaRpcSubscriptionsApi>[];
   wallet: { address: string; keypair?: unknown };
-  logger: (message: string, level?: string, options?: { console?: boolean }) => void;
+  logger: (
+    message: string,
+    level?: string,
+    options?: { console?: boolean; sync?: boolean }
+  ) => void;
   persistState: (options?: { sync?: boolean; force?: boolean }) => Promise<void>;
   calculateGMI: () => number;
+  rotateRpcSubscriptions: () => void;
+  getCurrentRpcSubscriptions: () => RpcSubscriptions<SolanaRpcSubscriptionsApi>;
   store: StateStore;
+  tui?: {
+    log: (message: string, level?: string) => void;
+    refresh: (backpressureFactor?: number) => void;
+  };
+  getBackpressureFactor?: () => number;
   recordScanBackpressureEvent?: (error: unknown) => void;
   getEffectiveParallelism?: (base: number) => number;
   scanBackpressureFactor?: number;
@@ -484,4 +550,28 @@ export interface WalletBalance {
   rawAmount: bigint;
   decimals: number;
   uiAmount: number;
+}
+
+export interface ParsedInstruction {
+  parsed?: {
+    type?: string;
+    info?: {
+      mint?: string;
+    };
+  };
+}
+
+export interface InnerInstruction {
+  instructions: ParsedInstruction[];
+}
+
+export interface TransactionData {
+  transaction?: {
+    message?: {
+      instructions: ParsedInstruction[];
+    };
+  };
+  meta?: {
+    innerInstructions?: InnerInstruction[];
+  };
 }

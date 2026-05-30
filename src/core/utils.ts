@@ -12,13 +12,12 @@ declare const require: (id: string) => unknown;
 
 /**
  * Ensures that the parent directory for a given file path exists.
- * @param filePath - The path to the file.
+ * Utilizes recursive directory creation which is idempotent.
+ * @param filePath - The path to the file whose parent directory should exist.
  */
 export function ensureParentDirectory(filePath: string): void {
   const directory = path.dirname(path.resolve(filePath));
-  if (!fs.existsSync(directory)) {
-    fs.mkdirSync(directory, { recursive: true });
-  }
+  fs.mkdirSync(directory, { recursive: true });
 }
 
 /**
@@ -28,7 +27,11 @@ export function ensureParentDirectory(filePath: string): void {
  * @param content - The content to write.
  * @throws {Error} If the write fails after maximum retries.
  */
-export async function atomicWriteFile(filePath: string, content: string): Promise<void> {
+export async function atomicWriteFile(
+  filePath: string,
+  content: string,
+  options: { logErrors?: boolean } = {}
+): Promise<void> {
   if (!filePath) return;
   const resolvedPath = path.resolve(filePath);
   ensureParentDirectory(resolvedPath);
@@ -57,11 +60,13 @@ export async function atomicWriteFile(filePath: string, content: string): Promis
     }
   }
 
-  console.error(
-    `[SYSTEM ERROR] Atomic write failed for ${filePath} after retries: ${
-      lastError instanceof Error ? lastError.message : String(lastError)
-    }`
-  );
+  if (options.logErrors !== false) {
+    console.error(
+      `[SYSTEM ERROR] Atomic write failed for ${filePath} after retries: ${
+        lastError instanceof Error ? lastError.message : String(lastError)
+      }`
+    );
+  }
   try {
     if (fs.existsSync(tempPath)) await fsPromises.unlink(tempPath);
   } catch {}
@@ -113,15 +118,26 @@ export function safeJsonStringify(value: unknown, space?: number | string): stri
   );
 }
 
+let consoleSuppressed = false;
+
+/**
+ * Globally enables or disables console output for the log function.
+ * Useful when a TUI is active to prevent overlapping output.
+ * @param suppressed - Whether to suppress console output.
+ */
+export function setConsoleSuppressed(suppressed: boolean): void {
+  consoleSuppressed = suppressed;
+}
+
 /**
  * Logs a message to a file and/or the console.
- * @param logFilePath - Path to the log file.
+ * @param logFilePath - Path to the log file (optional).
  * @param message - The message to log.
  * @param level - The log level (info, warn, error, trade, debug).
  * @param options - Logging options.
  */
 export function log(
-  logFilePath: string,
+  logFilePath: string | undefined | null,
   message: string,
   level: string = 'info',
   options: { sync?: boolean; console?: boolean } = {}
@@ -145,6 +161,8 @@ export function log(
       appendFileLine(logFilePath, line);
     }
   }
+
+  if (consoleSuppressed) return;
 
   const shouldPrint =
     options.console !== undefined
@@ -326,13 +344,27 @@ export enum PRIORITY {
   LOW = 3,
 }
 
+/**
+ * A lightweight in-memory cache with time-to-live (TTL) support.
+ */
 class ShortTermCache {
   private store = new Map<string, { value: unknown; expiresAt: number }>();
 
+  /**
+   * Sets a value in the cache.
+   * @param key - The cache key.
+   * @param value - The value to store.
+   * @param ttlMs - Time-to-live in milliseconds.
+   */
   set(key: string, value: unknown, ttlMs: number = 5000): void {
     this.store.set(key, { value, expiresAt: Date.now() + ttlMs });
   }
 
+  /**
+   * Retrieves a value from the cache if it hasn't expired.
+   * @param key - The cache key.
+   * @returns The cached value or null if not found or expired.
+   */
   get(key: string): unknown | null {
     const entry = this.store.get(key);
     if (!entry) return null;
@@ -343,6 +375,9 @@ class ShortTermCache {
     return entry.value;
   }
 
+  /**
+   * Clears all entries from the cache.
+   */
   clear(): void {
     this.store.clear();
   }
@@ -352,8 +387,8 @@ const rpcCache = new ShortTermCache();
 
 /**
  * Creates a priority-aware token bucket rate limiter.
- * @param ratePerSec - The number of tokens per second.
- * @returns An async function (priority) => Promise<void>.
+ * @param ratePerSec - The number of tokens (requests) allowed per second.
+ * @returns An async function that resolves when a token is acquired, respecting priority.
  */
 function makePriorityTokenBucket(ratePerSec: number): (priority?: PRIORITY) => Promise<void> {
   const intervalMs = 1000 / ratePerSec;
@@ -450,7 +485,7 @@ export async function rpcCall<TMethod extends keyof SolanaRpcApi>(
   const cacheTtlMs = options.cacheTtlMs ?? 0;
   let lastError: unknown = null;
 
-  const cacheKey = cacheTtlMs > 0 ? `${String(method)}:${JSON.stringify(params)}` : null;
+  const cacheKey = cacheTtlMs > 0 ? `${String(method)}:${safeJsonStringify(params)}` : null;
   if (cacheKey) {
     const cached = rpcCache.get(cacheKey);
     if (cached !== null) return cached as ReturnType<SolanaRpcApi[TMethod]>;
@@ -544,7 +579,7 @@ export async function fetchJson<T = unknown>(
       const fetchOptions: RequestInit & { [key: string]: unknown } = {
         method: options.method || 'GET',
         headers,
-        body: options.body ? JSON.stringify(options.body) : undefined,
+        body: options.body ? safeJsonStringify(options.body) : undefined,
         signal: controller.signal,
       };
       if (fetchTransportOptionName) {
@@ -567,7 +602,7 @@ export async function fetchJson<T = unknown>(
         }
       }
       if (!response.ok) {
-        const details = data ? JSON.stringify(data) : text;
+        const details = data ? safeJsonStringify(data) : text;
         throw new Error(`HTTP ${response.status} for ${url}: ${details}`);
       }
       return data as T;
@@ -587,6 +622,11 @@ export async function fetchJson<T = unknown>(
   );
 }
 
+/**
+ * Checks if an error is an AbortError from a fetch operation.
+ * @param error - The error to check.
+ * @returns True if it is an AbortError.
+ */
 function isAbortError(error: unknown): boolean {
   return (
     (error as { name?: string })?.name === 'AbortError' ||
@@ -594,6 +634,11 @@ function isAbortError(error: unknown): boolean {
   );
 }
 
+/**
+ * Determines if a fetch error is transient and potentially retryable.
+ * @param error - The error to check.
+ * @returns True if the error is transient.
+ */
 function isTransientFetchError(error: unknown): boolean {
   const message = String((error as { message?: string })?.message || '');
   return (
@@ -604,6 +649,13 @@ function isTransientFetchError(error: unknown): boolean {
   );
 }
 
+/**
+ * Formats a fetch error message to be more descriptive.
+ * @param url - The URL that was being fetched.
+ * @param error - The error that occurred.
+ * @param timeoutMs - The timeout value used for the request.
+ * @returns A formatted error string.
+ */
 function formatFetchError(url: string, error: unknown, timeoutMs: number): string {
   if (isAbortError(error)) return `Request timed out after ${timeoutMs}ms for ${url}`;
   const message = String((error as { message?: string })?.message || '');
@@ -611,6 +663,12 @@ function formatFetchError(url: string, error: unknown, timeoutMs: number): strin
   return `Request failed for ${url}: ${message}`;
 }
 
+/**
+ * Normalizes a concurrency value to a positive integer.
+ * @param value - The input value.
+ * @param fallback - The fallback value if input is invalid.
+ * @returns A normalized concurrency number (at least 1).
+ */
 export function normalizeConcurrency(value: unknown, fallback: number = 1): number {
   const numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric < 1) return fallback;
@@ -836,3 +894,16 @@ export function computeSpread(bid: number, ask: number): number {
   if (!(bid > 0) || !(ask > 0)) return 0;
   return Math.abs(ask - bid) / ((ask + bid) / 2);
 }
+
+/**
+ * Service object containing key utility functions to allow for patching/mocking in tests.
+ */
+export const utilService = {
+  atomicWriteFile,
+  appendFileLine,
+  appendFileLineSync,
+  log,
+  sendNotification,
+  journalPaperTrade,
+  journalClosedTrade,
+};

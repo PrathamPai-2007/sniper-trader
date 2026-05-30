@@ -1,7 +1,9 @@
 import { EventEmitter } from 'node:events';
-import fs from 'node:fs';
-import path from 'node:path';
-import { atomicWriteFile, safeJsonStringify, log } from './utils.js';
+import Database from 'better-sqlite3';
+import { log, safeJsonStringify } from './utils.js';
+import { SQLiteDb } from './db.js';
+import { migrateJsonToSqlite } from './migrate.js';
+import { MAX_TRACKED_MINTS } from './config.js';
 import {
   Config,
   State,
@@ -17,29 +19,46 @@ import {
 } from '../types/index.js';
 
 /**
- * StateStore manages the bot's runtime state, metrics, and persistence.
+ * StateStore manages the bot's runtime state, metrics, and persistence using SQLite.
  * It extends EventEmitter to provide a reactive interface for state changes.
  */
 export class StateStore extends EventEmitter {
   public config: Config;
   public state: State;
-  private _persistTimer: NodeJS.Timeout | null = null;
-  private _mintsPersistTimer: NodeJS.Timeout | null = null;
-  private _persistencePromise: Promise<void> = Promise.resolve();
+  private _sqlite: SQLiteDb | null = null;
+  private _writeQueue: Array<() => void> = [];
+  private _flushTimer: NodeJS.Timeout | null = null;
+  private _isFlushing = false;
   private _shutdownRequested = false;
-  private _mintsChanged = false;
+
+  // Prepared Statements
+  private stmtUpsertPosition: Database.Statement | null = null;
+  private stmtRemovePosition: Database.Statement | null = null;
+  private stmtAddClosedTrade: Database.Statement | null = null;
+  private stmtUpsertRecheck: Database.Statement | null = null;
+  private stmtRemoveRecheck: Database.Statement | null = null;
+  private stmtUpsertMetric: Database.Statement | null = null;
+  private stmtTrackMint: Database.Statement | null = null;
+  private stmtUntrackMint: Database.Statement | null = null;
+  private stmtUpsertKV: Database.Statement | null = null;
+  private stmtUpsertCooldown: Database.Statement | null = null;
+  private stmtRemoveCooldown: Database.Statement | null = null;
+  private stmtUpsertRetired: Database.Statement | null = null;
+  private stmtRemoveRetired: Database.Statement | null = null;
+  private stmtUpsertLaunch: Database.Statement | null = null;
+  private stmtUpsertSnapshot: Database.Statement | null = null;
+  private stmtRemoveSnapshot: Database.Statement | null = null;
 
   constructor(config: Config) {
     super();
     this.config = config;
     this.state = this._getDefaultState();
-
-    // Derived paths for incremental persistence
-    if (this.config.stateFile) {
-      this.config.mintsFile = this.config.stateFile.replace(/\.json$/, '_mints.json');
-    }
   }
 
+  /**
+   * Provides the default initial state for the store.
+   * @private
+   */
   private _getDefaultState(): State {
     return {
       processedMintQueue: [],
@@ -73,194 +92,242 @@ export class StateStore extends EventEmitter {
         exitReasonCounts: {},
         rejectionReasons: {},
       },
+      sessionStartingSolBalanceLamports: null,
+      peakSessionSolBalanceLamports: null,
     };
   }
 
   /**
-   * Loads the state from disk.
-   * @param stateFile - Path to the state file.
+   * Loads the state from SQLite, performing migration if necessary.
+   * @param stateFile - Base path for state files (will be converted to .db).
    */
-  public load(stateFile: string): void {
+  public async load(stateFile: string): Promise<void> {
     if (!stateFile) return;
-    const resolvedPath = path.resolve(stateFile);
-    const resolvedMintsPath = path.resolve(this.config.mintsFile || '');
+    const dbPath = stateFile.replace(/\.json$/, '.db');
+    this._sqlite = new SQLiteDb(dbPath, this.config.logFile);
+    this._sqlite.init();
 
-    // 1. Load Main State
-    if (fs.existsSync(resolvedPath)) {
-      try {
-        const parsed = JSON.parse(fs.readFileSync(resolvedPath, 'utf8')) as Record<string, unknown>;
+    // 1. Migrate if needed
+    const mintsFile = stateFile.replace(/\.json$/, '_mints.json');
+    await migrateJsonToSqlite(stateFile, mintsFile, this._sqlite, this.config.logFile);
 
-        const rechecks = Array.isArray(parsed.pendingCandidateRechecks)
-          ? (parsed.pendingCandidateRechecks as RecheckItem[])
-          : [];
-        this.state.pendingCandidateRechecks = new Map(
-          rechecks.filter((e) => e?.mint).map((e) => [e.mint, e])
-        );
+    // 2. Prepare Statements
+    this._prepareStatements();
 
-        const positions = Array.isArray(parsed.positions) ? (parsed.positions as Position[]) : [];
-        this.state.positions = new Map(positions.map((p) => [p.mint, p]));
+    // 3. Load from SQLite
+    this._loadFromDb();
+  }
 
-        const launchHistoryRaw = parsed.launchHistory;
-        if (Array.isArray(launchHistoryRaw)) {
-          this.state.launchHistory = launchHistoryRaw as LaunchHistoryEntry[];
-        }
-        this.state.paperSolBalanceLamports =
-          (parsed.paperSolBalanceLamports as string) ??
-          this.config.initialPaperSolLamports?.toString();
-        const tradeHistoryRaw = parsed.tradeHistory;
-        if (Array.isArray(tradeHistoryRaw)) {
-          this.state.tradeHistory = tradeHistoryRaw as boolean[];
-        }
-        this.state.moodPauseUntil = (parsed.moodPauseUntil as number) || null;
-        this.state.coolDownMints = new Map(
-          Object.entries((parsed.coolDownMints as Record<string, CoolDownEntry>) || {})
-        );
-        this.state.retiredMints = new Map(
-          Object.entries((parsed.retiredMints as Record<string, RetiredMintEntry>) || {})
-        );
-        const closedTradesRaw = parsed.closedTrades;
-        if (Array.isArray(closedTradesRaw)) {
-          this.state.closedTrades = closedTradesRaw as ClosedTrade[];
-        }
-        const metricsRaw = parsed.metrics;
-        if (metricsRaw && typeof metricsRaw === 'object') {
-          this.state.metrics = {
-            ...this.state.metrics,
-            ...(metricsRaw as Partial<StateMetrics>),
-          };
-        }
-
-        log(this.config.logFile, 'Main state loaded successfully.', 'info');
-      } catch (error: unknown) {
-        log(
-          this.config.logFile,
-          `Failed to load main state: ${error instanceof Error ? error.message : String(error)}`,
-          'warn'
-        );
-      }
-    }
-
-    // 2. Load Processed Mints (Legacy fallback to main state if mintsFile doesn't exist)
-    if (fs.existsSync(resolvedMintsPath)) {
-      try {
-        const parsedMints = JSON.parse(fs.readFileSync(resolvedMintsPath, 'utf8')) as Record<
-          string,
-          unknown
-        >;
-        const queue = parsedMints.processedMintQueue;
-        this.state.processedMintQueue = Array.isArray(queue) ? (queue as string[]) : [];
-        this.state.processedMints = new Set(this.state.processedMintQueue);
-        log(
-          this.config.logFile,
-          `Loaded ${this.state.processedMints.size} processed mints from dedicated file.`,
-          'info'
-        );
-      } catch (error: unknown) {
-        log(
-          this.config.logFile,
-          `Failed to load mints state: ${error instanceof Error ? error.message : String(error)}`,
-          'warn'
-        );
-      }
-    } else if (fs.existsSync(resolvedPath)) {
-      // Fallback for first run after refactor: check if they were in the main state
-      try {
-        const parsedFallback = JSON.parse(fs.readFileSync(resolvedPath, 'utf8')) as Record<
-          string,
-          unknown
-        >;
-        const queueFallback = parsedFallback.processedMintQueue;
-        if (Array.isArray(queueFallback)) {
-          this.state.processedMintQueue = queueFallback as string[];
-          this.state.processedMints = new Set(this.state.processedMintQueue);
+  private _enqueueWrite(operation: (() => void) | undefined): void {
+    if (!operation || this._shutdownRequested) return;
+    this._writeQueue.push(operation);
+    if (!this._flushTimer) {
+      const delayMs = Math.max(1, Number(this.config.stateFlushIntervalMs || 250));
+      this._flushTimer = setTimeout(() => {
+        this._flushTimer = null;
+        this._flushQueuedWrites().catch((err: unknown) => {
           log(
             this.config.logFile,
-            `Loaded ${this.state.processedMints.size} processed mints from main state fallback.`,
-            'info'
+            `SQLite queued persistence failed: ${err instanceof Error ? err.message : String(err)}`,
+            'error'
           );
-        }
-      } catch {}
+        });
+      }, delayMs);
+    }
+  }
+
+  private async _flushQueuedWrites(): Promise<void> {
+    if (this._isFlushing || !this._sqlite || this._writeQueue.length === 0) return;
+    this._isFlushing = true;
+    const batch = this._writeQueue.splice(0);
+    try {
+      this._sqlite.db.transaction((writes: Array<() => void>) => {
+        for (const write of writes) write();
+      })(batch);
+    } finally {
+      this._isFlushing = false;
     }
   }
 
   /**
-   * Schedules an atomic persistence of the current state.
-   * @param options - Persistence options.
+   * Prepares SQLite statements for efficient data persistence.
+   * @private
    */
-  public async persist(options: { force?: boolean; mints?: boolean } = {}): Promise<void> {
-    if (!this.config.stateFile || (this._shutdownRequested && !options.force)) return;
+  private _prepareStatements(): void {
+    if (!this._sqlite) return;
+    const { db } = this._sqlite;
 
-    if (options.force) {
-      if (this._persistTimer) clearTimeout(this._persistTimer);
-      if (this._mintsPersistTimer) clearTimeout(this._mintsPersistTimer);
-      return this._doPersist(true);
-    }
+    this.stmtUpsertPosition = db.prepare(`
+      INSERT OR REPLACE INTO positions (mint, symbol, name, opened_at, entry_price_usd, data)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    this.stmtRemovePosition = db.prepare('DELETE FROM positions WHERE mint = ?');
 
-    if (options.mints) this._mintsChanged = true;
+    this.stmtAddClosedTrade = db.prepare(`
+      INSERT INTO closed_trades (mint, symbol, exit_reason, realized_pnl_usd, realized_pnl_sol, closed_at, data)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
 
-    // Debounce main state (2s)
-    if (!this._persistTimer) {
-      this._persistTimer = setTimeout(() => {
-        this._persistTimer = null;
-        this._doPersist(false).catch(() => {});
-      }, 2000);
-    }
+    this.stmtUpsertRecheck = db.prepare(
+      'INSERT OR REPLACE INTO rechecks (mint, data) VALUES (?, ?)'
+    );
+    this.stmtRemoveRecheck = db.prepare('DELETE FROM rechecks WHERE mint = ?');
 
-    // Debounce mints state (30s)
-    if (this._mintsChanged && !this._mintsPersistTimer) {
-      this._mintsPersistTimer = setTimeout(() => {
-        this._mintsPersistTimer = null;
-        this._doPersist(true).catch(() => {});
-      }, 30000);
-    }
+    this.stmtUpsertMetric = db.prepare('INSERT OR REPLACE INTO metrics (key, value) VALUES (?, ?)');
+
+    this.stmtTrackMint = db.prepare(
+      'INSERT OR REPLACE INTO processed_mints (mint, timestamp) VALUES (?, ?)'
+    );
+    this.stmtUntrackMint = db.prepare('DELETE FROM processed_mints WHERE mint = ?');
+
+    this.stmtUpsertKV = db.prepare('INSERT OR REPLACE INTO kv_store (key, value) VALUES (?, ?)');
+
+    this.stmtUpsertCooldown = db.prepare(
+      'INSERT OR REPLACE INTO cooldowns (mint, data) VALUES (?, ?)'
+    );
+    this.stmtRemoveCooldown = db.prepare('DELETE FROM cooldowns WHERE mint = ?');
+
+    this.stmtUpsertRetired = db.prepare(
+      'INSERT OR REPLACE INTO retired_mints (mint, data) VALUES (?, ?)'
+    );
+    this.stmtRemoveRetired = db.prepare('DELETE FROM retired_mints WHERE mint = ?');
+
+    this.stmtUpsertLaunch = db.prepare(
+      'INSERT OR REPLACE INTO launch_history (mint, timestamp, data) VALUES (?, ?, ?)'
+    );
+
+    this.stmtUpsertSnapshot = db.prepare(
+      'INSERT OR REPLACE INTO snapshots (mint, data) VALUES (?, ?)'
+    );
+    this.stmtRemoveSnapshot = db.prepare('DELETE FROM snapshots WHERE mint = ?');
   }
 
-  private async _doPersist(includeMints = false): Promise<void> {
-    this._persistencePromise = this._persistencePromise.then(async () => {
-      // 1. Persist Main State
-      const mainPayload = {
-        pendingCandidateRechecks: Array.from(this.state.pendingCandidateRechecks.values()),
-        positions: Array.from(this.state.positions.values()),
-        launchHistory: this.state.launchHistory,
-        paperSolBalanceLamports: this.state.paperSolBalanceLamports,
-        tradeHistory: this.state.tradeHistory,
-        moodPauseUntil: this.state.moodPauseUntil,
-        coolDownMints: Object.fromEntries(this.state.coolDownMints),
-        retiredMints: Object.fromEntries(this.state.retiredMints),
-        closedTrades: this.state.closedTrades,
-        metrics: this.state.metrics,
-      };
+  /**
+   * Loads all state data from the SQLite database into memory.
+   * @private
+   */
+  private _loadFromDb(): void {
+    if (!this._sqlite) return;
+    const { db } = this._sqlite;
 
-      try {
-        await atomicWriteFile(this.config.stateFile, safeJsonStringify(mainPayload, 2));
-        if (this.config.metricsFile) {
-          await atomicWriteFile(this.config.metricsFile, safeJsonStringify(this.state.metrics, 2));
-        }
-      } catch (err: unknown) {
-        log(
-          this.config.logFile,
-          `Main persistence failed: ${err instanceof Error ? err.message : String(err)}`,
-          'error'
-        );
+    // Load Positions
+    const positions = db.prepare('SELECT data FROM positions').all() as { data: string }[];
+    this.state.positions = new Map(
+      positions.map((p) => {
+        const parsed = JSON.parse(p.data) as Position;
+        return [parsed.mint, parsed];
+      })
+    );
+
+    // Load Rechecks
+    const rechecks = db.prepare('SELECT data FROM rechecks').all() as { data: string }[];
+    this.state.pendingCandidateRechecks = new Map(
+      rechecks.map((r) => {
+        const parsed = JSON.parse(r.data) as RecheckItem;
+        return [parsed.mint, parsed];
+      })
+    );
+
+    // Load Metrics
+    const metrics = db.prepare('SELECT key, value FROM metrics').all() as {
+      key: string;
+      value: string;
+    }[];
+    for (const m of metrics) {
+      const key = m.key as keyof StateMetrics;
+      if (key === 'exitReasonCounts' || key === 'rejectionReasons') {
+        this.state.metrics[key] = JSON.parse(m.value) as Record<string, number>;
+      } else if (typeof this.state.metrics[key] === 'number') {
+        (this.state.metrics as any)[key] = Number(m.value);
       }
+    }
 
-      // 2. Persist Mints State (Lazily)
-      if (includeMints && this._mintsChanged && this.config.mintsFile) {
-        const mintsPayload = { processedMintQueue: this.state.processedMintQueue };
-        try {
-          await atomicWriteFile(this.config.mintsFile, safeJsonStringify(mintsPayload));
-          this._mintsChanged = false;
-        } catch (err: unknown) {
-          log(
-            this.config.logFile,
-            `Mints persistence failed: ${err instanceof Error ? err.message : String(err)}`,
-            'error'
-          );
-        }
-      }
-    });
+    // Load Processed Mints
+    const mints = db.prepare('SELECT mint FROM processed_mints ORDER BY timestamp ASC').all() as {
+      mint: string;
+    }[];
+    this.state.processedMintQueue = mints.map((m) => m.mint);
+    this.state.processedMints = new Set(this.state.processedMintQueue);
 
-    return this._persistencePromise;
+    // Load Closed Trades (limit to last 500)
+    const closedTrades = db
+      .prepare('SELECT data FROM closed_trades ORDER BY id DESC LIMIT 500')
+      .all() as { data: string }[];
+    this.state.closedTrades = closedTrades.map((t) => JSON.parse(t.data) as ClosedTrade).reverse();
+
+    // Load Launch History (last 100)
+    const launchHistory = db
+      .prepare('SELECT data FROM launch_history ORDER BY timestamp DESC LIMIT 100')
+      .all() as { data: string }[];
+    this.state.launchHistory = launchHistory
+      .map((l) => JSON.parse(l.data) as LaunchHistoryEntry)
+      .reverse();
+
+    // Load Cooldowns
+    const cooldowns = db.prepare('SELECT mint, data FROM cooldowns').all() as {
+      mint: string;
+      data: string;
+    }[];
+    this.state.coolDownMints = new Map(
+      cooldowns.map((c) => [c.mint, JSON.parse(c.data) as CoolDownEntry])
+    );
+
+    // Load Retired Mints
+    const retired = db.prepare('SELECT mint, data FROM retired_mints').all() as {
+      mint: string;
+      data: string;
+    }[];
+    this.state.retiredMints = new Map(
+      retired.map((r) => [r.mint, JSON.parse(r.data) as RetiredMintEntry])
+    );
+
+    // Load Market Snapshots
+    const snapshots = db.prepare('SELECT mint, data FROM snapshots').all() as {
+      mint: string;
+      data: string;
+    }[];
+    this.state.marketSnapshots = new Map(
+      snapshots.map((s) => [s.mint, JSON.parse(s.data) as MarketSnapshot])
+    );
+
+    // Load KV Store
+    const kv = db.prepare('SELECT key, value FROM kv_store').all() as {
+      key: string;
+      value: string;
+    }[];
+    for (const item of kv) {
+      if (item.key === 'paperSolBalanceLamports') this.state.paperSolBalanceLamports = item.value;
+      if (item.key === 'tradeHistory')
+        this.state.tradeHistory = JSON.parse(item.value) as boolean[];
+      if (item.key === 'moodPauseUntil')
+        this.state.moodPauseUntil = item.value === 'null' ? null : Number(item.value);
+      if (item.key === 'sessionStartingSolBalanceLamports')
+        this.state.sessionStartingSolBalanceLamports = item.value === 'null' ? null : item.value;
+      if (item.key === 'peakSessionSolBalanceLamports')
+        this.state.peakSessionSolBalanceLamports = item.value === 'null' ? null : item.value;
+    }
+
+    // Initialize session starting balance if not set (first run of session)
+    if (!this.state.sessionStartingSolBalanceLamports) {
+      this.state.sessionStartingSolBalanceLamports = this.state.paperSolBalanceLamports;
+      this.state.peakSessionSolBalanceLamports = this.state.paperSolBalanceLamports;
+      const startVal = this.state.sessionStartingSolBalanceLamports;
+      const peakVal = this.state.peakSessionSolBalanceLamports;
+      this._enqueueWrite(
+        this.stmtUpsertKV
+          ? () => {
+              this.stmtUpsertKV!.run('sessionStartingSolBalanceLamports', startVal);
+              this.stmtUpsertKV!.run('peakSessionSolBalanceLamports', peakVal);
+            }
+          : undefined
+      );
+    }
+
+    log(
+      this.config.logFile,
+      `State loaded from SQLite: ${this.state.positions.size} positions, ${this.state.processedMints.size} mints.`,
+      'info'
+    );
   }
 
   /**
@@ -271,17 +338,27 @@ export class StateStore extends EventEmitter {
     if (this.state.processedMints.has(mint)) return;
 
     this.state.pendingCandidateRechecks.delete(mint);
+    this._enqueueWrite(
+      this.stmtRemoveRecheck ? () => this.stmtRemoveRecheck!.run(mint) : undefined
+    );
+
     this.state.processedMints.add(mint);
     this.state.processedMintQueue.push(mint);
 
-    const MAX_TRACKED = 5000;
-    while (this.state.processedMintQueue.length > MAX_TRACKED) {
+    const now = Date.now();
+    this._enqueueWrite(this.stmtTrackMint ? () => this.stmtTrackMint!.run(mint, now) : undefined);
+
+    while (this.state.processedMintQueue.length > MAX_TRACKED_MINTS) {
       const removed = this.state.processedMintQueue.shift();
-      if (removed) this.state.processedMints.delete(removed);
+      if (removed) {
+        this.state.processedMints.delete(removed);
+        this._enqueueWrite(
+          this.stmtUntrackMint ? () => this.stmtUntrackMint!.run(removed) : undefined
+        );
+      }
     }
 
     this.emit('mintTracked', mint);
-    this.persist({ mints: true });
   }
 
   /**
@@ -291,10 +368,13 @@ export class StateStore extends EventEmitter {
   public untrackMint(mint: string): void {
     if (this.state.processedMints.delete(mint)) {
       this.state.processedMintQueue = this.state.processedMintQueue.filter((m) => m !== mint);
+      this._enqueueWrite(this.stmtUntrackMint ? () => this.stmtUntrackMint!.run(mint) : undefined);
       this.emit('mintUntracked', mint);
-      this.persist({ mints: true });
     }
     this.state.pendingCandidateRechecks.delete(mint);
+    this._enqueueWrite(
+      this.stmtRemoveRecheck ? () => this.stmtRemoveRecheck!.run(mint) : undefined
+    );
   }
 
   /**
@@ -304,8 +384,22 @@ export class StateStore extends EventEmitter {
   public upsertPosition(position: Position): void {
     const isNew = !this.state.positions.has(position.mint);
     this.state.positions.set(position.mint, position);
+
+    this._enqueueWrite(
+      this.stmtUpsertPosition
+        ? () =>
+            this.stmtUpsertPosition!.run(
+              position.mint,
+              position.symbol,
+              position.name,
+              position.openedAt,
+              position.entryPriceUsd,
+              safeJsonStringify(position)
+            )
+        : undefined
+    );
+
     this.emit(isNew ? 'positionAdded' : 'positionUpdated', position);
-    this.persist();
   }
 
   /**
@@ -316,22 +410,42 @@ export class StateStore extends EventEmitter {
     const position = this.state.positions.get(mint);
     if (position) {
       this.state.positions.delete(mint);
+      this._enqueueWrite(
+        this.stmtRemovePosition ? () => this.stmtRemovePosition!.run(mint) : undefined
+      );
       this.emit('positionRemoved', position);
-      this.persist();
     }
   }
 
   /**
-   * Increments a metric value.
-   * @param key - The metric key.
-   * @param amount - The amount to increment by.
+   * Increments a numeric metric value.
+   * @param key - The metric key to increment.
+   * @param amount - The amount to increment by (default: 1).
    */
   public incrementMetric(key: keyof StateMetrics, amount = 1): void {
     const value = this.state.metrics[key];
     if (typeof value === 'number') {
-      (this.state.metrics as unknown as Record<keyof StateMetrics, number>)[key] = value + amount;
-      this.emit('metricUpdated', { key, value: this.state.metrics[key] });
+      const newValue = value + amount;
+      (this.state.metrics as any)[key] = newValue;
+      this._enqueueWrite(
+        this.stmtUpsertMetric ? () => this.stmtUpsertMetric!.run(key, String(newValue)) : undefined
+      );
+      this.emit('metricUpdated', { key, value: newValue });
     }
+  }
+
+  /**
+   * Updates a metric value directly (e.g., for non-numeric or complex metrics).
+   * @param key - The metric key.
+   * @param value - The new value.
+   */
+  public updateMetric<K extends keyof StateMetrics>(key: K, value: StateMetrics[K]): void {
+    this.state.metrics[key] = value;
+    const stringValue = typeof value === 'object' ? safeJsonStringify(value) : String(value);
+    this._enqueueWrite(
+      this.stmtUpsertMetric ? () => this.stmtUpsertMetric!.run(key, stringValue) : undefined
+    );
+    this.emit('metricUpdated', { key, value });
   }
 
   /**
@@ -342,8 +456,13 @@ export class StateStore extends EventEmitter {
     if (!code) return;
     this.state.metrics.rejectionReasons[code] =
       (this.state.metrics.rejectionReasons[code] || 0) + 1;
+    const payload = safeJsonStringify(this.state.metrics.rejectionReasons);
+    this._enqueueWrite(
+      this.stmtUpsertMetric
+        ? () => this.stmtUpsertMetric!.run('rejectionReasons', payload)
+        : undefined
+    );
     this.emit('rejectionRecorded', code);
-    this.persist();
   }
 
   /**
@@ -352,8 +471,30 @@ export class StateStore extends EventEmitter {
    */
   public updatePaperSolBalance(amountLamports: bigint | string): void {
     this.state.paperSolBalanceLamports = amountLamports.toString();
+    const value = this.state.paperSolBalanceLamports;
+    this._enqueueWrite(
+      this.stmtUpsertKV ? () => this.stmtUpsertKV!.run('paperSolBalanceLamports', value) : undefined
+    );
     this.emit('paperSolBalanceUpdated', this.state.paperSolBalanceLamports);
-    this.persist();
+    this.updateSessionPeakBalance();
+  }
+
+  /**
+   * Updates the session's peak SOL balance if the current balance is higher.
+   */
+  public updateSessionPeakBalance(): void {
+    const current = BigInt(this.state.paperSolBalanceLamports);
+    const peak = BigInt(this.state.peakSessionSolBalanceLamports || '0');
+    if (current > peak) {
+      this.state.peakSessionSolBalanceLamports = current.toString();
+      const val = this.state.peakSessionSolBalanceLamports;
+      this._enqueueWrite(
+        this.stmtUpsertKV
+          ? () => this.stmtUpsertKV!.run('peakSessionSolBalanceLamports', val)
+          : undefined
+      );
+      this.emit('sessionPeakBalanceUpdated', val);
+    }
   }
 
   /**
@@ -365,8 +506,22 @@ export class StateStore extends EventEmitter {
     if (this.state.closedTrades.length > 500) {
       this.state.closedTrades.shift();
     }
+    const payload = safeJsonStringify(trade);
+    this._enqueueWrite(
+      this.stmtAddClosedTrade
+        ? () =>
+            this.stmtAddClosedTrade!.run(
+              trade.mint,
+              trade.symbol,
+              trade.exitReason,
+              trade.realizedPnlUsd,
+              trade.realizedPnlSol || 0,
+              trade.closedAt,
+              payload
+            )
+        : undefined
+    );
     this.emit('tradeClosed', trade);
-    this.persist();
   }
 
   /**
@@ -377,11 +532,16 @@ export class StateStore extends EventEmitter {
     if (!reason) return;
     this.state.metrics.exitReasonCounts[reason] =
       (this.state.metrics.exitReasonCounts[reason] || 0) + 1;
+    const payload = safeJsonStringify(this.state.metrics.exitReasonCounts);
+    this._enqueueWrite(
+      this.stmtUpsertMetric
+        ? () => this.stmtUpsertMetric!.run('exitReasonCounts', payload)
+        : undefined
+    );
     this.emit('exitReasonIncremented', {
       reason,
       count: this.state.metrics.exitReasonCounts[reason],
     });
-    this.persist();
   }
 
   /**
@@ -390,8 +550,11 @@ export class StateStore extends EventEmitter {
    */
   public pauseMood(durationMs: number): void {
     this.state.moodPauseUntil = Date.now() + durationMs;
+    const value = String(this.state.moodPauseUntil);
+    this._enqueueWrite(
+      this.stmtUpsertKV ? () => this.stmtUpsertKV!.run('moodPauseUntil', value) : undefined
+    );
     this.emit('moodPaused', this.state.moodPauseUntil);
-    this.persist();
   }
 
   /**
@@ -403,8 +566,11 @@ export class StateStore extends EventEmitter {
     if (this.state.tradeHistory.length > 50) {
       this.state.tradeHistory.shift();
     }
+    const payload = safeJsonStringify(this.state.tradeHistory);
+    this._enqueueWrite(
+      this.stmtUpsertKV ? () => this.stmtUpsertKV!.run('tradeHistory', payload) : undefined
+    );
     this.emit('tradeResultAdded', isWin);
-    this.persist();
   }
 
   /**
@@ -414,9 +580,13 @@ export class StateStore extends EventEmitter {
    * @param expiresAt - Expiration timestamp in milliseconds.
    */
   public startCoolDown(mint: string, pUsd: number, expiresAt: number): void {
-    this.state.coolDownMints.set(mint, { expiresAt, lastExitPriceUsd: pUsd });
+    const data = { expiresAt, lastExitPriceUsd: pUsd };
+    this.state.coolDownMints.set(mint, data);
+    const payload = safeJsonStringify(data);
+    this._enqueueWrite(
+      this.stmtUpsertCooldown ? () => this.stmtUpsertCooldown!.run(mint, payload) : undefined
+    );
     this.emit('coolDownStarted', { mint, expiresAt });
-    this.persist();
   }
 
   /**
@@ -426,8 +596,11 @@ export class StateStore extends EventEmitter {
    */
   public updateMarketSnapshot(mint: string, snapshot: MarketSnapshot): void {
     this.state.marketSnapshots.set(mint, snapshot);
+    const payload = safeJsonStringify(snapshot);
+    this._enqueueWrite(
+      this.stmtUpsertSnapshot ? () => this.stmtUpsertSnapshot!.run(mint, payload) : undefined
+    );
     this.emit('marketSnapshotUpdated', { mint, snapshot });
-    this.persist();
   }
 
   /**
@@ -467,6 +640,12 @@ export class StateStore extends EventEmitter {
           timestamp: now,
         };
         this.state.launchHistory.push(newEntry);
+        const payload = safeJsonStringify(newEntry);
+        this._enqueueWrite(
+          this.stmtUpsertLaunch
+            ? () => this.stmtUpsertLaunch!.run(newEntry.mint, newEntry.timestamp, payload)
+            : undefined
+        );
         historyMap.set(token.id, newEntry);
       } else {
         existingEntry.highestSeenPrice = Math.max(existingEntry.highestSeenPrice, p);
@@ -476,15 +655,20 @@ export class StateStore extends EventEmitter {
         ) {
           existingEntry.isSuccess = true;
         }
+        const payload = safeJsonStringify(existingEntry);
+        this._enqueueWrite(
+          this.stmtUpsertLaunch
+            ? () => this.stmtUpsertLaunch!.run(existingEntry.mint, existingEntry.timestamp, payload)
+            : undefined
+        );
       }
     }
 
-    // Cap at 100 most recent launches
+    // Cap at 100 most recent launches in memory
     if (this.state.launchHistory.length > 100) {
       this.state.launchHistory = this.state.launchHistory.slice(-100);
     }
     this.emit('launchHistoryUpdated', this.state.launchHistory);
-    this.persist();
   }
 
   /**
@@ -492,9 +676,15 @@ export class StateStore extends EventEmitter {
    * @param entry - The recheck entry object.
    */
   public upsertRecheckEntry(entry: RecheckItem): void {
+    if (entry.scheduledTime && !entry.nextEligibleAt) {
+      entry.nextEligibleAt = new Date(entry.scheduledTime).toISOString();
+    }
     this.state.pendingCandidateRechecks.set(entry.mint, entry);
+    const payload = safeJsonStringify(entry);
+    this._enqueueWrite(
+      this.stmtUpsertRecheck ? () => this.stmtUpsertRecheck!.run(entry.mint, payload) : undefined
+    );
     this.emit('recheckEntryUpserted', entry);
-    this.persist();
   }
 
   /**
@@ -503,8 +693,10 @@ export class StateStore extends EventEmitter {
    */
   public removeRecheckEntry(mint: string): void {
     if (this.state.pendingCandidateRechecks.delete(mint)) {
+      this._enqueueWrite(
+        this.stmtRemoveRecheck ? () => this.stmtRemoveRecheck!.run(mint) : undefined
+      );
       this.emit('recheckEntryRemoved', mint);
-      this.persist();
     }
   }
 
@@ -514,8 +706,10 @@ export class StateStore extends EventEmitter {
    */
   public removeCoolDown(mint: string): void {
     if (this.state.coolDownMints.delete(mint)) {
+      this._enqueueWrite(
+        this.stmtRemoveCooldown ? () => this.stmtRemoveCooldown!.run(mint) : undefined
+      );
       this.emit('coolDownRemoved', mint);
-      this.persist();
     }
   }
 
@@ -526,8 +720,11 @@ export class StateStore extends EventEmitter {
    */
   public retireMint(mint: string, data: RetiredMintEntry): void {
     this.state.retiredMints.set(mint, data);
+    const payload = safeJsonStringify(data);
+    this._enqueueWrite(
+      this.stmtUpsertRetired ? () => this.stmtUpsertRetired!.run(mint, payload) : undefined
+    );
     this.emit('mintRetired', { mint, data });
-    this.persist();
   }
 
   /**
@@ -536,8 +733,10 @@ export class StateStore extends EventEmitter {
    */
   public unretireMint(mint: string): void {
     if (this.state.retiredMints.delete(mint)) {
+      this._enqueueWrite(
+        this.stmtRemoveRetired ? () => this.stmtRemoveRetired!.run(mint) : undefined
+      );
       this.emit('mintUnretired', mint);
-      this.persist();
     }
   }
 
@@ -547,16 +746,37 @@ export class StateStore extends EventEmitter {
    */
   public removeMarketSnapshot(mint: string): void {
     if (this.state.marketSnapshots.delete(mint)) {
+      this._enqueueWrite(
+        this.stmtRemoveSnapshot ? () => this.stmtRemoveSnapshot!.run(mint) : undefined
+      );
       this.emit('marketSnapshotRemoved', mint);
-      this.persist();
     }
   }
 
   /**
-   * Waits for all pending persistence operations to complete.
+   * Flushes any pending state to the database (dummy for backward compatibility).
+   * @param _options - Optional persistence options.
    */
-  public async flush(): Promise<void> {
-    await this._persistencePromise;
+  public async flush(_options?: { sync?: boolean; force?: boolean }): Promise<void> {
+    if (this._flushTimer) {
+      clearTimeout(this._flushTimer);
+      this._flushTimer = null;
+    }
+    await this._flushQueuedWrites();
+    if (this._shutdownRequested) {
+      this._sqlite?.close();
+      this._sqlite = null;
+    }
+  }
+
+  /**
+   * Persists the state to the database (dummy for backward compatibility).
+   * @param _options - Optional persistence options.
+   */
+  public async persist(options?: { sync?: boolean; force?: boolean }): Promise<void> {
+    if (options?.force || options?.sync) {
+      await this.flush(options);
+    }
   }
 
   /**

@@ -1,6 +1,6 @@
 import {
   sleep,
-  atomicWriteFile,
+  utilService,
   fetchJson,
   atomicToDecimalString,
   decimalToAtomic,
@@ -19,6 +19,7 @@ import { address, getProgramDerivedAddress, getAddressEncoder } from '@solana/ad
 import * as engine from './engine/engine.service.js';
 import * as trading from './trading/trading.service.js';
 import * as monitor from './monitor/monitor.service.js';
+import { portfolioService } from './trading/portfolio.service.js';
 import {
   Context,
   Config,
@@ -29,6 +30,12 @@ import {
 } from '../types/index.js';
 import path from 'node:path';
 
+/**
+ * Resolves the configured buy amount in lamports.
+ * Supports both direct lamport value and SOL decimal text.
+ * @param config - The application configuration.
+ * @returns Atomic lamport amount as string.
+ */
 function resolveBuyAmountLamports(config: Config): string {
   if (config.buyAmountLamports !== undefined && config.buyAmountLamports !== null) {
     return String(config.buyAmountLamports);
@@ -40,32 +47,50 @@ function resolveBuyAmountLamports(config: Config): string {
 }
 
 /**
- * Fetches recent token launches from Jupiter.
+ * Fetches recent token launches from Jupiter API.
+ * @param ctx - The application context.
+ * @returns Array of recent token metadata.
  */
 export async function fetchRecentLaunches(ctx: Context): Promise<TokenMetadata[]> {
   const url = `${ctx.config.jupiterBaseUrl}/tokens/v2/recent`;
-  const data = (await fetchJson(url, {
-    headers: { 'x-api-key': ctx.config.jupiterApiKey },
-    timeoutMs: 8000,
-    retries: 1,
-  })) as TokenMetadata[];
-  if (!Array.isArray(data)) throw new Error('Unexpected Jupiter recent response shape.');
-  return data;
+  try {
+    const data = (await fetchJson(url, {
+      headers: { 'x-api-key': ctx.config.jupiterApiKey },
+      timeoutMs: 8000,
+      retries: 2,
+    })) as TokenMetadata[];
+    if (!Array.isArray(data)) throw new Error('Unexpected Jupiter recent response shape.');
+    return data;
+  } catch (e: unknown) {
+    throw new Error(
+      `Failed to fetch recent launches: ${e instanceof Error ? e.message : String(e)}`,
+      { cause: e }
+    );
+  }
 }
 
 const PUMP_FUN_CURVE_SEED = 'bonding-curve';
 
 /**
- * Fetches market data (price, liquidity) directly from on-chain RPC for supported launchpads.
+ * Fetches market data (price, liquidity) directly from on-chain RPC for supported launchpads (e.g., Pump.fun).
+ * This acts as a high-speed fallback when Jupiter API is lagging.
+ * @param ctx - The application context.
+ * @param mint - Token mint address.
+ * @param launchpadName - Optional launchpad hint.
  */
 export async function fetchDirectMarketData(
   ctx: Context,
   mint: string,
   launchpadName: string | null = null
 ): Promise<{ usdPrice: number; liquidity: number; isCompleted: boolean; source: string } | null> {
-  const launchpad = engine.getLaunchpadProfile(
-    launchpadName || ctx.state.marketSnapshots.get(mint)?.launchpad || 'pump.fun'
-  );
+  let effectiveLaunchpad = launchpadName || ctx.state.marketSnapshots.get(mint)?.launchpad;
+  if (!effectiveLaunchpad || effectiveLaunchpad === 'unknown') {
+    if (mint.toLowerCase().endsWith('pump')) {
+      effectiveLaunchpad = 'pump.fun';
+    }
+  }
+
+  const launchpad = engine.getLaunchpadProfile(effectiveLaunchpad || 'pump.fun');
   if (launchpad.name !== 'pump.fun') return null;
 
   try {
@@ -87,7 +112,7 @@ export async function fetchDirectMarketData(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } as any,
       ],
-      { priority: PRIORITY.MEDIUM, cacheTtlMs: 5000 }
+      { priority: PRIORITY.MEDIUM, cacheTtlMs: 2000 }
     )) as { value: { data: string[] } | null };
 
     const data = account.value?.data;
@@ -119,7 +144,10 @@ export async function fetchDirectMarketData(
 }
 
 /**
- * Fetches current prices for a batch of mints from Jupiter.
+ * Fetches current prices for a batch of mints from Jupiter V3 Price API.
+ * @param ctx - The application context.
+ * @param mints - Array of mint addresses.
+ * @param apiKey - Optional API key override.
  */
 export async function fetchPrices(
   ctx: Context,
@@ -128,33 +156,43 @@ export async function fetchPrices(
 ): Promise<Record<string, { usdPrice: number; [key: string]: unknown }>> {
   if (mints.length === 0) return {};
   const url = `${ctx.config.jupiterBaseUrl}/price/v3?ids=${encodeURIComponent(mints.join(','))}`;
-  const response = (await fetchJson(url, {
-    headers: { 'x-api-key': apiKey || ctx.config.jupiterApiKey },
-    timeoutMs: 5000,
-    retries: 1,
-  })) as { data?: Record<string, { usdPrice?: number; price?: number; [key: string]: unknown }> };
 
-  if (!response || typeof response !== 'object') throw new Error('Invalid Jupiter price response.');
-  const priceMap = (response.data ?? response) as Record<
-    string,
-    { usdPrice?: number; price?: number; [key: string]: unknown }
-  >;
-  if (!priceMap || typeof priceMap !== 'object') return {};
+  try {
+    const response = (await fetchJson(url, {
+      headers: { 'x-api-key': apiKey || ctx.config.jupiterApiKey },
+      timeoutMs: 5000,
+      retries: 1,
+    })) as { data?: Record<string, { usdPrice?: number; price?: number; [key: string]: unknown }> };
 
-  const normalized: Record<string, { usdPrice: number; [key: string]: unknown }> = {};
-  for (const [id, record] of Object.entries(priceMap)) {
-    if (record) {
-      normalized[id] = {
-        ...record,
-        usdPrice: Number(record.usdPrice || record.price || 0),
-      };
+    const priceMap = (response?.data ?? response) as Record<
+      string,
+      { usdPrice?: number; price?: number; [key: string]: unknown }
+    >;
+    if (!priceMap || typeof priceMap !== 'object') return {};
+
+    const normalized: Record<string, { usdPrice: number; [key: string]: unknown }> = {};
+    for (const [id, record] of Object.entries(priceMap)) {
+      if (record) {
+        normalized[id] = {
+          ...record,
+          usdPrice: Number(record.usdPrice || record.price || 0),
+        };
+      }
     }
+    return normalized;
+  } catch (e: unknown) {
+    ctx.logger(`Jupiter price fetch failed: ${e instanceof Error ? e.message : String(e)}`, 'warn');
+    return {};
   }
-  return normalized;
 }
 
 /**
- * Fetches prices with fallback to per-mint requests if the batch fails.
+ * Fetches prices with a hybrid approach: Jupiter API + Direct RPC Fallback.
+ * This ensures high availability and accuracy for volatile tokens.
+ * @param ctx - The application context.
+ * @param mints - Array of mint addresses to refresh.
+ * @param contextLabel - Label for logging context.
+ * @param apiKey - Optional API key override.
  */
 export async function fetchPricesBestEffort(
   ctx: Context,
@@ -162,28 +200,18 @@ export async function fetchPricesBestEffort(
   contextLabel = 'price refresh',
   apiKey: string | null = null
 ): Promise<Record<string, { usdPrice: number; [key: string]: unknown }>> {
-  if (mints.length === 0) return {};
+  const uniqueMints = [...new Set(mints.filter(Boolean))];
+  if (uniqueMints.length === 0) return {};
   const startedAt = Date.now();
   const key = apiKey || ctx.config.jupiterApiKey;
 
   const [apiResult, onChainResults] = await Promise.all([
-    (async () => {
-      try {
-        return await fetchPrices(ctx, mints, key);
-      } catch (e: unknown) {
-        ctx.logger(
-          `Batch ${contextLabel} API failed: ${e instanceof Error ? e.message : String(e)}.`,
-          'debug'
-        );
-        return {};
-      }
-    })(),
+    fetchPrices(ctx, uniqueMints, key),
     runBoundedPool(
-      mints,
+      uniqueMints,
       async (mint) => {
         const direct = await fetchDirectMarketData(ctx, mint);
-        if (direct) return { [mint]: direct };
-        return null;
+        return direct ? { [mint]: direct } : null;
       },
       { concurrency: ctx.config.priceFallbackParallelism || 5 }
     ),
@@ -195,8 +223,9 @@ export async function fetchPricesBestEffort(
   for (const result of onChainResults) {
     if (result.status === 'fulfilled' && result.value) {
       const mint = result.item;
-      const val = result.value as Record<string, { usdPrice: number; [key: string]: unknown }>;
-      const directData = val[mint];
+      const directData = (
+        result.value as Record<string, { usdPrice: number; [key: string]: unknown }>
+      )[mint];
       if (directData) {
         directCount++;
         if (prices[mint]) {
@@ -212,25 +241,18 @@ export async function fetchPricesBestEffort(
     }
   }
 
-  const missingMints = mints.filter((m) => !prices[m] || !(prices[m].usdPrice > 0));
-  if (missingMints.length > 0) {
+  const stillMissingMints = uniqueMints.filter((m) => !prices[m] || !(prices[m].usdPrice > 0));
+  if (stillMissingMints.length > 0) {
     const fallbackResults = await runBoundedPool(
-      missingMints,
+      stillMissingMints,
       async (mint) => {
-        try {
-          return await fetchPrices(ctx, [mint], key);
-        } catch {
-          return {};
-        }
+        return fetchPrices(ctx, [mint], key);
       },
-      { concurrency: ctx.config.priceFallbackParallelism || 2 }
+      { concurrency: ctx.config.priceFallbackParallelism || 1 }
     );
-    for (const result of fallbackResults) {
-      if (result.status === 'fulfilled' && result.value) {
-        Object.assign(
-          prices,
-          result.value as Record<string, { usdPrice: number; [key: string]: unknown }>
-        );
+    for (const r of fallbackResults) {
+      if (r.status === 'fulfilled' && r.value) {
+        Object.assign(prices, r.value);
       }
     }
   }
@@ -238,7 +260,7 @@ export async function fetchPricesBestEffort(
   const duration = Date.now() - startedAt;
   if (duration > 2000) {
     ctx.logger(
-      `Slow ${contextLabel}: duration=${duration}ms, mints=${mints.length}, direct=${directCount}, api=${Object.keys(apiResult).length}, fallback=${missingMints.length}`,
+      `Slow ${contextLabel}: duration=${duration}ms, mints=${uniqueMints.length}, direct=${directCount}, api=${Object.keys(apiResult).length}, fallback=${stillMissingMints.length}`,
       'debug'
     );
   }
@@ -246,6 +268,7 @@ export async function fetchPricesBestEffort(
   return prices;
 }
 
+// Re-export core engine evaluation logic
 import {
   evaluateCandidate as engineEvaluateCandidate,
   getLaunchpadProfile as engineGetLaunchpadProfile,
@@ -257,7 +280,10 @@ export const looksLikeMemecoin = engineLooksLikeMemecoin;
 
 /**
  * Evaluates a candidate and executes a buy order if approved.
- * Supports paper, dry-run, and live trading modes.
+ * Supports Paper, Dry-Run, and Live trading modes.
+ * @param ctx - The application context.
+ * @param evaluation - The audit evaluation result.
+ * @param prefetchedQuotePromise - Optional promise of a pre-fetched quote to minimize latency.
  */
 export async function buyCandidate(
   ctx: Context,
@@ -266,221 +292,42 @@ export async function buyCandidate(
 ): Promise<Position | null> {
   ctx.store.incrementMetric('buyAttempts');
   const { token, candidateScore } = evaluation;
-  const decimals = Number(
-    token.decimals || (evaluation.mintSignals ? evaluation.mintSignals.decimals : 0) || 0
-  );
+  const decimals = Number(token.decimals || 6);
+
   const tpPlan = monitor.getTakeProfitPlan(ctx, candidateScore);
   const mood = monitor.getMoodAdjustments(ctx);
+
   if (mood.isPaused) {
     ctx.logger(`Buy skipped for ${token.symbol}: Mood Paused.`, 'warn');
     return null;
   }
 
   try {
-    const configuredBuyAmountLamports = resolveBuyAmountLamports(ctx.config);
-    const buyLamports =
-      (BigInt(configuredBuyAmountLamports) * BigInt(Math.round(mood.sizeMultiplier * 100))) / 100n;
+    const baseBuyLamports = BigInt(resolveBuyAmountLamports(ctx.config));
+    const adjustedBuySize = portfolioService.getAdjustedBuySize(ctx, baseBuyLamports);
+
+    const buyLamports = (adjustedBuySize * BigInt(Math.round(mood.sizeMultiplier * 100))) / 100n;
     const buySolText = atomicToDecimalString(buyLamports, 9, 6);
 
     if (ctx.config.paperTrading) {
-      if (BigInt(ctx.state.paperSolBalanceLamports) < buyLamports) {
-        ctx.logger(
-          `Paper wallet insufficient SOL: ${atomicToDecimalString(ctx.state.paperSolBalanceLamports, 9, 6)}.`,
-          'warn'
-        );
-        return null;
-      }
-      const quote = await trading.buildPaperBuyQuote(ctx, token, decimals, buyLamports);
-      const entryPriceSol = quote.entryPriceUsd / quote.solPrice;
-      const entrySolValue = Number(atomicToDecimalString(buyLamports, 9, 9));
-      ctx.store.updatePaperSolBalance(BigInt(ctx.state.paperSolBalanceLamports) - buyLamports);
-      const pos = {
-        mint: token.id,
-        symbol: token.symbol,
-        name: token.name,
-        decimals,
-        openedAt: new Date().toISOString(),
-        mode: 'paper' as const,
-        entryPriceUsd: quote.entryPriceUsd,
-        entryPriceSol,
-        entryUsdValue: quote.entryUsdValue,
-        initialBuyAmountSol: buySolText,
-        initialBuyAmountLamports: buyLamports.toString(),
-        initialTokenAmountRaw: quote.outAmount.toString(),
-        targetsHit: 0,
-        tpProfile: tpPlan.profileId,
-        takeProfitMultiples: tpPlan.takeProfitMultiples,
-        takeProfitFractions: tpPlan.takeProfitFractions,
-        highGrowthConfidence: tpPlan.isHighGrowthConfidence,
-        trailingStopDrawdownPctResolved: tpPlan.trailingStopDrawdownPct,
-        maxHoldMinutesResolved: tpPlan.maxHoldMinutesResolved,
-        lastKnownBalanceRaw: quote.outAmount.toString(),
-        lastKnownPriceUsd: Number(token.usdPrice || 0),
-        highestPriceUsd: quote.entryPriceUsd,
-        partiallyClosed: false,
-        remainingCostUsd: quote.entryUsdValue,
-        remainingCostSol: entrySolValue,
-        realizedPnlUsd: 0,
-        realizedPnlSol: 0,
-        realizedProceedsUsd: 0,
-        realizedProceedsSol: 0,
-        entryLiquidityUsd: Number(token.liquidity || 0),
-        lastKnownLiquidityUsd: Number(token.liquidity || 0),
-        volatilityScaler: evaluation.volatilityScaler || 0,
-        launchpad: token.launchpad || null,
-        entryScore: candidateScore,
-        paperEntryQuoteOutAmount: quote.outAmount.toString(),
-        minTpReached: false,
-        minTpFirstReachedAt: null,
-        minTpArmed: false,
-        trailingArmed: false,
-        mintSignals: evaluation.mintSignals,
-        securitySignals: {
-          goPlusToken: evaluation.goPlusTokenSignals || null,
-          bubbleMaps: evaluation.bubbleMapsSignals || null,
-        },
-        marketData: {
-          price: token.usdPrice,
-          liquidity: token.liquidity,
-          volume24h: token.volume24h,
-          buyPressure: token.buyPressure,
-          sellPressure: token.sellPressure,
-        },
-      };
-
-      const logDir = path.dirname(ctx.config.logFile);
-      const tradesFilePath = path.join(logDir, 'trades.jsonl');
-      fs.appendFile(tradesFilePath, safeJsonStringify(pos) + '\n', (err: unknown) => {
-        if (err)
-          ctx.logger(
-            `Failed to append to trades file at ${tradesFilePath}: ${err instanceof Error ? err.message : String(err)}`,
-            'error'
-          );
-      });
-
-      ctx.store.upsertPosition(pos);
-      journalPaperTrade(ctx, {
-        event: 'buy',
-        mint: token.id,
-        symbol: token.symbol,
-        priceUsd: quote.entryPriceUsd,
-        solAmount: buySolText,
-        tokenAmount: quote.outAmount.toString(),
-        mode: 'paper',
-      });
-      const balText = atomicToDecimalString(ctx.state.paperSolBalanceLamports, 9, 4);
-      ctx.logger(
-        `PAPER buy ${token.symbol} (${token.id}) (score ${candidateScore}). Tokens ${atomicToDecimalString(quote.outAmount, decimals, 6)}. [PAPER SOL: ${balText}]`,
-        'trade'
-      );
-      return pos;
+      return await executePaperBuy(ctx, evaluation, buyLamports, buySolText, decimals, tpPlan);
     }
 
-    const order = prefetchedQuotePromise
-      ? (await prefetchedQuotePromise) ||
-        (await trading.fetchSwapOrder(ctx, SOL_MINT, token.id, buyLamports.toString()))
-      : await trading.fetchSwapOrder(ctx, SOL_MINT, token.id, buyLamports.toString());
-
-    const entryUsdValue =
-      Number(order.inUsdValue || 0) > 0
-        ? Number(order.inUsdValue)
-        : await trading.estimateSolUsdValue(ctx, buyLamports);
-    const solPrice = await trading.estimateSolUsdPrice(ctx);
-    const entryPriceSol = (token.usdPrice || 0) / solPrice;
-    const entrySolValue = Number(atomicToDecimalString(buyLamports, 9, 9));
-    const beforeBalance = await trading.getWalletTokenBalance(ctx, token.id, PRIORITY.HIGH);
     if (ctx.config.dryRun) {
+      await trading.tradingService.getWalletTokenBalance(ctx, token.id, PRIORITY.HIGH);
       ctx.logger(`DRY_RUN would buy ${token.symbol} for ${buySolText} SOL.`, 'trade');
       return null;
     }
 
-    const sig = await trading.executeSwapOrder(ctx, order);
-
-    let afterBalance = beforeBalance;
-    for (let i = 0; i < 5; i++) {
-      await sleep(1500);
-      afterBalance = await trading.getWalletTokenBalance(ctx, token.id, PRIORITY.HIGH);
-      if (afterBalance.rawAmount > beforeBalance.rawAmount) break;
-    }
-
-    const received =
-      afterBalance.rawAmount - beforeBalance.rawAmount > 0n
-        ? afterBalance.rawAmount - beforeBalance.rawAmount
-        : BigInt(order.outAmount || '0');
-    if (received <= 0n) throw new Error(`Buy delta was zero in ${sig}.`);
-    const actualDecimals = afterBalance.decimals || decimals;
-    const units = Number(atomicToDecimalString(received, actualDecimals, 9));
-    const entryPriceUsd = units > 0 ? entryUsdValue / units : Number(token.usdPrice || 0);
-    const pos = {
-      mint: token.id,
-      symbol: token.symbol,
-      name: token.name,
-      decimals: actualDecimals,
-      openedAt: new Date().toISOString(),
-      mode: 'live' as const,
-      entryPriceUsd,
-      entryPriceSol,
-      entryUsdValue,
-      initialBuyAmountSol: buySolText,
-      initialBuyAmountLamports: buyLamports.toString(),
-      initialTokenAmountRaw: received.toString(),
-      targetsHit: 0,
-      tpProfile: tpPlan.profileId,
-      takeProfitMultiples: tpPlan.takeProfitMultiples,
-      takeProfitFractions: tpPlan.takeProfitFractions,
-      highGrowthConfidence: tpPlan.isHighGrowthConfidence,
-      trailingStopDrawdownPctResolved: tpPlan.trailingStopDrawdownPct,
-      maxHoldMinutesResolved: tpPlan.maxHoldMinutesResolved,
-      lastKnownBalanceRaw: afterBalance.rawAmount.toString(),
-      lastKnownPriceUsd: Number(token.usdPrice || 0),
-      highestPriceUsd: entryPriceUsd,
-      partiallyClosed: false,
-      remainingCostUsd: entryUsdValue,
-      remainingCostSol: entrySolValue,
-      realizedPnlUsd: 0,
-      realizedPnlSol: 0,
-      realizedProceedsUsd: 0,
-      realizedProceedsSol: 0,
-      entryLiquidityUsd: Number(token.liquidity || 0),
-      lastKnownLiquidityUsd: Number(token.liquidity || 0),
-      volatilityScaler: evaluation.volatilityScaler || 0,
-      launchpad: token.launchpad || null,
-      entryScore: candidateScore,
-      buySignature: sig,
-      minTpReached: false,
-      minTpFirstReachedAt: null,
-      minTpArmed: false,
-      trailingArmed: false,
-      mintSignals: evaluation.mintSignals,
-      securitySignals: {
-        goPlusToken: evaluation.goPlusTokenSignals || null,
-        bubbleMaps: evaluation.bubbleMapsSignals || null,
-      },
-      marketData: {
-        price: token.usdPrice,
-        liquidity: token.liquidity,
-        volume24h: token.volume24h,
-        buyPressure: token.buyPressure,
-        sellPressure: token.sellPressure,
-      },
-    };
-
-    const logDir = path.dirname(ctx.config.logFile);
-    const statsFilePath = path.join(logDir, 'stats.json');
-    atomicWriteFile(statsFilePath, safeJsonStringify(pos, 2)).catch((err: unknown) =>
-      ctx.logger(
-        `Failed to save stats file at ${statsFilePath}: ${err instanceof Error ? err.message : String(err)}`,
-        'error'
-      )
+    return await executeLiveBuy(
+      ctx,
+      evaluation,
+      buyLamports,
+      buySolText,
+      decimals,
+      tpPlan,
+      prefetchedQuotePromise
     );
-    ctx.store.upsertPosition(pos);
-    const msg = `🚀 <b>BUY: ${token.symbol}</b>\nScore: ${candidateScore}\nAmount: ${buySolText} SOL\nPrice: ${formatUsd(entryPriceUsd)}`;
-    await sendNotification(ctx, msg);
-    ctx.logger(
-      `Bought ${token.symbol} for ${buySolText} SOL. Entry ${formatUsd(entryPriceUsd)} in tx ${sig}.`,
-      'trade'
-    );
-    return pos;
   } catch (e: unknown) {
     ctx.store.incrementMetric('buyFailures');
     ctx.logger(
@@ -492,7 +339,250 @@ export async function buyCandidate(
 }
 
 /**
- * Periodically monitors open positions for exit conditions (SL, TP, etc.).
+ * Executes a simulated buy in Paper Trading mode.
+ */
+async function executePaperBuy(
+  ctx: Context,
+  evaluation: EvaluationResult,
+  buyLamports: bigint,
+  buySolText: string,
+  decimals: number,
+  tpPlan: monitor.TakeProfitPlan
+): Promise<Position | null> {
+  const { token, candidateScore } = evaluation;
+  if (BigInt(ctx.state.paperSolBalanceLamports) < buyLamports) {
+    ctx.logger(`Paper wallet insufficient SOL.`, 'warn');
+    return null;
+  }
+
+  const quote = await trading.buildPaperBuyQuote(ctx, token, decimals, buyLamports);
+  ctx.store.updatePaperSolBalance(BigInt(ctx.state.paperSolBalanceLamports) - buyLamports);
+
+  const pos: Position = {
+    mint: token.id,
+    symbol: token.symbol,
+    name: token.name,
+    decimals,
+    openedAt: new Date().toISOString(),
+    mode: 'paper',
+    entryPriceUsd: quote.entryPriceUsd,
+    entryPriceSol: quote.entryPriceUsd / quote.solPrice,
+    entryUsdValue: quote.entryUsdValue,
+    initialBuyAmountSol: buySolText,
+    initialBuyAmountLamports: buyLamports.toString(),
+    initialTokenAmountRaw: quote.outAmount.toString(),
+    targetsHit: 0,
+    tpProfile: tpPlan.profileId,
+    takeProfitMultiples: tpPlan.takeProfitMultiples,
+    takeProfitFractions: tpPlan.takeProfitFractions,
+    highGrowthConfidence: tpPlan.isHighGrowthConfidence,
+    trailingStopDrawdownPctResolved: tpPlan.trailingStopDrawdownPct,
+    maxHoldMinutesResolved: tpPlan.maxHoldMinutesResolved,
+    lastKnownBalanceRaw: quote.outAmount.toString(),
+    lastKnownPriceUsd: Number(token.usdPrice || 0),
+    highestPriceUsd: quote.entryPriceUsd,
+    partiallyClosed: false,
+    remainingCostUsd: quote.entryUsdValue,
+    remainingCostSol: Number(atomicToDecimalString(buyLamports, 9, 9)),
+    realizedPnlUsd: 0,
+    realizedPnlSol: 0,
+    realizedProceedsUsd: 0,
+    realizedProceedsSol: 0,
+    entryLiquidityUsd: Number(token.liquidity || 0),
+    volatilityScaler: evaluation.volatilityScaler || 0,
+    launchpad: token.launchpad || null,
+    entryScore: candidateScore,
+    paperEntryQuoteOutAmount: quote.outAmount.toString(),
+    minTpReached: false,
+    minTpArmed: false,
+    trailingArmed: false,
+    mintSignals: evaluation.mintSignals,
+    securitySignals: {
+      goPlusToken: evaluation.goPlusTokenSignals || null,
+      bubbleMaps: evaluation.bubbleMapsSignals || null,
+    },
+    marketData: {
+      price: token.usdPrice,
+      liquidity: token.liquidity,
+      volume24h: token.volume24h,
+      buyPressure: token.buyPressure,
+      sellPressure: token.sellPressure,
+    },
+  };
+
+  ctx.store.upsertPosition(pos);
+  void logTradeToFile(ctx, 'trades.jsonl', pos);
+  journalPaperTrade(ctx, {
+    event: 'buy',
+    mint: token.id,
+    symbol: token.symbol,
+    priceUsd: quote.entryPriceUsd,
+    solAmount: buySolText,
+    tokenAmount: quote.outAmount.toString(),
+    mode: 'paper',
+  });
+
+  ctx.logger(
+    `PAPER buy ${token.symbol} (score ${candidateScore}). [PAPER SOL: ${atomicToDecimalString(ctx.state.paperSolBalanceLamports, 9, 4)}]`,
+    'trade'
+  );
+  return pos;
+}
+
+/**
+ * Executes a real buy on the Solana mainnet.
+ */
+async function executeLiveBuy(
+  ctx: Context,
+  evaluation: EvaluationResult,
+  buyLamports: bigint,
+  buySolText: string,
+  decimals: number,
+  tpPlan: monitor.TakeProfitPlan,
+  prefetchedQuotePromise: Promise<SwapOrder | null> | null
+): Promise<Position | null> {
+  const { token, candidateScore } = evaluation;
+  const solPricePromise = trading.tradingService.estimateSolUsdPrice(ctx);
+  const beforeBalancePromise = trading.tradingService.getWalletTokenBalance(
+    ctx,
+    token.id,
+    PRIORITY.HIGH
+  );
+
+  const initialOrder = prefetchedQuotePromise ? await prefetchedQuotePromise : null;
+  const beforeBalance = await beforeBalancePromise;
+  const { signature: sig, order } = await trading.tradingService.executeSwapOrderWithSmartRetry(
+    ctx,
+    SOL_MINT,
+    token.id,
+    buyLamports.toString(),
+    false,
+    initialOrder
+  );
+
+  // Poll for balance update to confirm transaction finality and get exact received amount
+  let afterBalance = beforeBalance;
+  for (let i = 0; i < 6; i++) {
+    await sleep(1000 + i * 500);
+    afterBalance = await trading.tradingService.getWalletTokenBalance(ctx, token.id, PRIORITY.HIGH);
+    if (afterBalance.rawAmount > beforeBalance.rawAmount) break;
+  }
+
+  const solPrice = await solPricePromise;
+  const entryUsdValue =
+    Number(order.inUsdValue || 0) > 0
+      ? Number(order.inUsdValue)
+      : await trading.tradingService.estimateSolUsdValue(ctx, buyLamports);
+  const entrySolValue =
+    entryUsdValue > 0 ? entryUsdValue / solPrice : Number(atomicToDecimalString(buyLamports, 9, 9));
+
+  const received =
+    afterBalance.rawAmount - beforeBalance.rawAmount > 0n
+      ? afterBalance.rawAmount - beforeBalance.rawAmount
+      : BigInt(order.outAmount || '0');
+  if (received <= 0n) throw new Error(`Buy confirmation failed (zero delta) for ${sig}`);
+
+  const actualDecimals = afterBalance.decimals || decimals;
+  const units = Number(atomicToDecimalString(received, actualDecimals, 9));
+  const entryPriceUsd = units > 0 ? entryUsdValue / units : Number(token.usdPrice || 0);
+
+  const pos: Position = {
+    mint: token.id,
+    symbol: token.symbol,
+    name: token.name,
+    decimals: actualDecimals,
+    openedAt: new Date().toISOString(),
+    mode: 'live',
+    entryPriceUsd,
+    entryPriceSol: entryPriceUsd / solPrice,
+    entryUsdValue,
+    initialBuyAmountSol: buySolText,
+    initialBuyAmountLamports: buyLamports.toString(),
+    initialTokenAmountRaw: received.toString(),
+    targetsHit: 0,
+    tpProfile: tpPlan.profileId,
+    takeProfitMultiples: tpPlan.takeProfitMultiples,
+    takeProfitFractions: tpPlan.takeProfitFractions,
+    highGrowthConfidence: tpPlan.isHighGrowthConfidence,
+    trailingStopDrawdownPctResolved: tpPlan.trailingStopDrawdownPct,
+    maxHoldMinutesResolved: tpPlan.maxHoldMinutesResolved,
+    lastKnownBalanceRaw: afterBalance.rawAmount.toString(),
+    lastKnownPriceUsd: entryPriceUsd,
+    highestPriceUsd: entryPriceUsd,
+    partiallyClosed: false,
+    remainingCostUsd: entryUsdValue,
+    remainingCostSol: entrySolValue,
+    realizedPnlUsd: 0,
+    realizedPnlSol: 0,
+    realizedProceedsUsd: 0,
+    realizedProceedsSol: 0,
+    entryLiquidityUsd: Number(token.liquidity || 0),
+    volatilityScaler: evaluation.volatilityScaler || 0,
+    launchpad: token.launchpad || null,
+    entryScore: candidateScore,
+    buySignature: sig,
+    minTpReached: false,
+    minTpArmed: false,
+    trailingArmed: false,
+    mintSignals: evaluation.mintSignals,
+    securitySignals: {
+      goPlusToken: evaluation.goPlusTokenSignals || null,
+      bubbleMaps: evaluation.bubbleMapsSignals || null,
+    },
+    marketData: {
+      price: token.usdPrice,
+      liquidity: token.liquidity,
+      volume24h: token.volume24h,
+      buyPressure: token.buyPressure,
+      sellPressure: token.sellPressure,
+    },
+  };
+
+  ctx.store.upsertPosition(pos);
+  void logTradeToFile(ctx, 'stats.json', pos, true);
+
+  const msg = `BUY: ${token.symbol}\nScore: ${candidateScore}\nAmount: ${buySolText} SOL\nPrice: ${formatUsd(entryPriceUsd)}`;
+  void sendNotification(ctx, msg).catch((err: unknown) => {
+    ctx.logger(
+      `Buy notification failed for ${token.symbol}: ${err instanceof Error ? err.message : String(err)}`,
+      'debug'
+    );
+  });
+
+  ctx.logger(
+    `Bought ${token.symbol} for ${buySolText} SOL. Entry ${formatUsd(entryPriceUsd)} in tx ${sig}.`,
+    'trade'
+  );
+  return pos;
+}
+
+/**
+ * Logs trade data to a file.
+ */
+async function logTradeToFile(
+  ctx: Context,
+  fileName: string,
+  data: unknown,
+  atomic = false
+): Promise<void> {
+  const logDir = path.dirname(ctx.config.logFile);
+  const filePath = path.join(logDir, fileName);
+  try {
+    if (atomic) {
+      await utilService.atomicWriteFile(filePath, safeJsonStringify(data, 2));
+    } else {
+      await fs.promises.appendFile(filePath, safeJsonStringify(data) + '\n');
+    }
+  } catch (err: unknown) {
+    ctx.logger(
+      `Failed to log to ${fileName}: ${err instanceof Error ? err.message : String(err)}`,
+      'error'
+    );
+  }
+}
+
+/**
+ * Periodically monitors open positions for exit conditions.
  */
 export async function monitorPositions(ctx: Context): Promise<void> {
   return monitor.monitorPositions(ctx, (c, m, label, key) =>
@@ -501,7 +591,7 @@ export async function monitorPositions(ctx: Context): Promise<void> {
 }
 
 /**
- * Closes all currently open positions, regardless of profit/loss.
+ * Closes all currently open positions.
  */
 export async function closeAllOpenPositions(ctx: Context): Promise<void> {
   return monitor.closeAllOpenPositions(
@@ -511,9 +601,13 @@ export async function closeAllOpenPositions(ctx: Context): Promise<void> {
   );
 }
 
+// Re-export mood adjustments from monitor service
 import { getMoodAdjustments as monitorGetMoodAdjustments } from './monitor/monitor.service.js';
 export const getMoodAdjustments = monitorGetMoodAdjustments;
 
+/**
+ * Merges two loop requests, combining reasons and signal counts.
+ */
 export function mergeLoopRequest(
   current: Record<string, unknown> | null,
   next: Record<string, unknown>
@@ -532,3 +626,21 @@ export function mergeLoopRequest(
       (current.reason as string),
   };
 }
+
+/**
+ * Service object to allow for easier mocking in ESM environments.
+ */
+export const appService = {
+  fetchRecentLaunches,
+  fetchDirectMarketData,
+  fetchPrices,
+  fetchPricesBestEffort,
+  evaluateCandidate,
+  getLaunchpadProfile,
+  looksLikeMemecoin,
+  buyCandidate,
+  monitorPositions,
+  closeAllOpenPositions,
+  getMoodAdjustments,
+  mergeLoopRequest,
+};

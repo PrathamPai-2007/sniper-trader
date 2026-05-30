@@ -1,7 +1,14 @@
+/**
+ * @module Analyze
+ * Provides tools for replaying historical trades and performing parameter sensitivity analysis.
+ * Used for optimizing trading strategies based on paper-trading or live-trading journals.
+ */
+
 'use strict';
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { safeJsonStringify } from './utils.js';
 import { StateMetrics } from '../types/index.js';
 
 /**
@@ -47,12 +54,19 @@ export interface AnalyzerTrade {
  * Parameters for the trade replay simulation.
  */
 export interface ReplayParams {
+  /** Stop loss percentage (e.g., 0.2 for 20%) */
   stopLossPct: number;
+  /** Trailing drawdown percentage (e.g., 0.15 for 15%) */
   trailingDrawdownPct: number;
+  /** Array of take-profit multiples (e.g., [1.5, 2.0]) */
   takeProfitMultiples: number[];
+  /** Fraction of position to sell at each TP target (e.g., 0.5 for 50%) */
   takeProfitFraction: number;
+  /** Performance drop percentage for early exit guard */
   earlyPerformanceDropPct: number;
+  /** Fraction of position to sell on early performance drop */
   earlyPerformanceSellPct: number;
+  /** Maximum hold time in minutes before mandatory exit */
   maxHoldMinutes: number;
 }
 
@@ -85,26 +99,44 @@ export interface AnalysisResult {
 // 1. Data ingestion
 // ---------------------------------------------------------------------------
 
+/**
+ * Finds all session directories within the project's logs folder.
+ * @param baseDir - Project root directory.
+ * @returns Array of absolute paths to session directories.
+ */
 function findSessionDirs(baseDir: string): string[] {
   const logsDir = path.join(baseDir, 'logs', 'paper-trading');
   if (!fs.existsSync(logsDir)) return [];
-  return fs
-    .readdirSync(logsDir)
-    .filter((d) => fs.statSync(path.join(logsDir, d)).isDirectory())
-    .sort()
-    .map((d) => path.join(logsDir, d));
+  try {
+    return fs
+      .readdirSync(logsDir)
+      .filter((d) => fs.statSync(path.join(logsDir, d)).isDirectory())
+      .sort()
+      .map((d) => path.join(logsDir, d));
+  } catch (err) {
+    console.error(`Failed to read logs directory: ${err}`);
+    return [];
+  }
 }
 
+/**
+ * Reads and parses a JSON file.
+ */
 function readJson<T = unknown>(filePath: string): T | null {
   try {
+    if (!fs.existsSync(filePath)) return null;
     return JSON.parse(fs.readFileSync(filePath, 'utf8')) as T;
   } catch {
     return null;
   }
 }
 
+/**
+ * Reads and parses a JSONL (JSON Lines) file.
+ */
 function readJsonl<T = unknown>(filePath: string): T[] {
   try {
+    if (!fs.existsSync(filePath)) return [];
     const content = fs.readFileSync(filePath, 'utf8').trim();
     if (!content) return [];
     return content
@@ -126,6 +158,11 @@ interface MetricEntry extends Partial<StateMetrics> {
   sessionDir: string;
 }
 
+/**
+ * Ingests all trading sessions found in the project.
+ * @param baseDir - Project root directory.
+ * @returns Object containing all ingested trades and session metrics.
+ */
 export function ingestSessions(baseDir: string): {
   trades: AnalyzerTrade[];
   metrics: MetricEntry[];
@@ -230,6 +267,14 @@ export function ingestSessions(baseDir: string): {
 // 2. Price path inference
 // ---------------------------------------------------------------------------
 
+/**
+ * Infers a synthetic price path for a trade based on entry, peak, and exit points.
+ * NOTE: This is a linear approximation and does not reflect actual intra-trade volatility.
+ *
+ * @param trade - The trade data to use for inference.
+ * @param numPoints - Number of price points to generate.
+ * @returns Array of time-price pairs.
+ */
 export function inferPricePath(
   trade: AnalyzerTrade,
   numPoints: number = 20
@@ -265,6 +310,13 @@ export function inferPricePath(
 // 3. Replay engine
 // ---------------------------------------------------------------------------
 
+/**
+ * Replays a trade using specific strategy parameters.
+ *
+ * @param trade - The historical trade data.
+ * @param params - Strategy parameters to test.
+ * @returns Replay result containing PnL and exit details.
+ */
 export function replayTrade(trade: AnalyzerTrade, params: ReplayParams): ReplayResult | null {
   const pricePath = inferPricePath(trade);
   if (pricePath.length < 2) return null;
@@ -304,6 +356,7 @@ export function replayTrade(trade: AnalyzerTrade, params: ReplayParams): ReplayR
 
     highestSeen = Math.max(highestSeen, p);
 
+    // 1. Early Performance Guard
     if (t <= earlyGuardSec && targetsHit === 0) {
       const drop = (entryP - p) / entryP;
       if (drop > earlyDropPct) {
@@ -316,6 +369,7 @@ export function replayTrade(trade: AnalyzerTrade, params: ReplayParams): ReplayR
       }
     }
 
+    // 2. Stop Loss
     const slPrice = entryP * (1 - slPct);
     if (p <= slPrice) {
       totalProceeds += originalCost * remainingTokens * (p / entryP);
@@ -325,6 +379,7 @@ export function replayTrade(trade: AnalyzerTrade, params: ReplayParams): ReplayR
       break;
     }
 
+    // 3. Take Profit Targets
     while (targetsHit < tpMultiples.length) {
       const targetP = entryP * (tpMultiples[targetsHit] || 1);
       if (p >= targetP && remainingTokens > 0.001) {
@@ -339,6 +394,7 @@ export function replayTrade(trade: AnalyzerTrade, params: ReplayParams): ReplayR
       }
     }
 
+    // 4. Trailing Stop
     if (!trailingArmed && p >= activationPrice) {
       trailingArmed = true;
     }
@@ -354,15 +410,18 @@ export function replayTrade(trade: AnalyzerTrade, params: ReplayParams): ReplayR
       }
     }
 
+    // 5. Time-based Exit
     const ageMin = t / 60;
     if (ageMin >= maxHoldMin && p < entryP * timeExitMinMultiple && remainingTokens > 0.001) {
       totalProceeds += originalCost * remainingTokens * (p / entryP);
+      remainingTokens = 0;
       exitReason = 'time-exit';
       exitTime = t;
       break;
     }
   }
 
+  // Final settlement if tokens remain
   if (remainingTokens > 0.001) {
     const finalPoint = pricePath[pricePath.length - 1];
     const finalExitP = finalPoint ? finalPoint.price : entryP;
@@ -387,6 +446,9 @@ export function replayTrade(trade: AnalyzerTrade, params: ReplayParams): ReplayR
 // 4. Parameter grid
 // ---------------------------------------------------------------------------
 
+/**
+ * Grid of parameters for sensitivity analysis.
+ */
 export const PARAM_GRID: Record<keyof ReplayParams, unknown[]> = {
   stopLossPct: [0.1, 0.15, 0.2, 0.25],
   trailingDrawdownPct: [0.1, 0.15, 0.2, 0.25],
@@ -397,6 +459,9 @@ export const PARAM_GRID: Record<keyof ReplayParams, unknown[]> = {
   maxHoldMinutes: [10, 20, 30, 60],
 };
 
+/**
+ * Generates all possible combinations of parameters from the grid.
+ */
 export function generateGrid(): ReplayParams[] {
   const keys = Object.keys(PARAM_GRID) as Array<keyof ReplayParams>;
   const values = keys.map((k) => PARAM_GRID[k]);
@@ -426,6 +491,9 @@ export function generateGrid(): ReplayParams[] {
   return [...cartesian(values as unknown[][])];
 }
 
+/**
+ * Formats parameters for display.
+ */
 function stringifyParams(p: ReplayParams): string {
   const parts = [];
   parts.push(`SL=${(p.stopLossPct * 100).toFixed(0)}%`);
@@ -442,6 +510,9 @@ function stringifyParams(p: ReplayParams): string {
 // 5. Analysis
 // ---------------------------------------------------------------------------
 
+/**
+ * Runs the analysis across all ingested trades and parameter combinations.
+ */
 export function runAnalysis(
   trades: AnalyzerTrade[],
   metrics: MetricEntry[]
@@ -518,6 +589,9 @@ function pad(str: unknown, len: number): string {
   return s.length >= len ? s : s + ' '.repeat(len - s.length);
 }
 
+/**
+ * Prints a summary of all historical trades to the console.
+ */
 function printTradeSummary(trades: AnalyzerTrade[]): void {
   console.log(`\n--- Trade Summary (${trades.length} trades) ---`);
   console.log(
@@ -546,6 +620,9 @@ function printTradeSummary(trades: AnalyzerTrade[]): void {
   }
 }
 
+/**
+ * Prints the top N parameter combinations by total PnL.
+ */
 function printTopCombos(results: AnalysisResult[], topN: number = 15): void {
   console.log(`\n--- Top ${topN} Parameter Combos (by Total PnL) ---`);
   console.log(
@@ -574,6 +651,9 @@ function printTopCombos(results: AnalysisResult[], topN: number = 15): void {
   }
 }
 
+/**
+ * Performs sensitivity analysis for each parameter.
+ */
 function printSensitivity(results: AnalysisResult[]): void {
   console.log(`\n--- Per-Parameter Sensitivity ---`);
 
@@ -603,6 +683,9 @@ function printSensitivity(results: AnalysisResult[]): void {
   }
 }
 
+/**
+ * Prints the rejection funnel based on session metrics.
+ */
 function printFunnel(metrics: MetricEntry[]): void {
   if (metrics.length === 0) return;
 
@@ -658,6 +741,9 @@ function printFunnel(metrics: MetricEntry[]): void {
 // 7. Main
 // ---------------------------------------------------------------------------
 
+/**
+ * Entry point for the analyzer CLI.
+ */
 export async function main(): Promise<void> {
   const baseDir = process.cwd();
   const { trades, metrics } = ingestSessions(baseDir);
@@ -675,30 +761,36 @@ export async function main(): Promise<void> {
   printFunnel(metrics);
 
   const outputFile = path.join(baseDir, 'analysis-results.json');
-  fs.writeFileSync(
-    outputFile,
-    JSON.stringify(
-      {
-        generatedAt: new Date().toISOString(),
-        tradeCount: trades.length,
-        comboCount: results.length,
-        topCombos: results.slice(0, 50).map((r) => ({
-          params: r.params,
-          totalPnl: r.totalPnl,
-          winRate: r.winRate,
-          avgPnl: r.avgPnl,
-          maxLoss: r.maxLoss,
-          profitFactor: r.profitFactor,
-        })),
-        sensitivity: computeSensitivitySummary(results),
-      },
-      null,
-      2
-    )
-  );
-  console.log(`\nFull results written to ${outputFile}`);
+  try {
+    fs.writeFileSync(
+      outputFile,
+      safeJsonStringify(
+        {
+          generatedAt: new Date().toISOString(),
+          tradeCount: trades.length,
+          comboCount: results.length,
+          topCombos: results.slice(0, 50).map((r) => ({
+            params: r.params,
+            totalPnl: r.totalPnl,
+            winRate: r.winRate,
+            avgPnl: r.avgPnl,
+            maxLoss: r.maxLoss,
+            profitFactor: r.profitFactor,
+          })),
+          sensitivity: computeSensitivitySummary(results),
+        },
+        2
+      )
+    );
+    console.log(`\nFull results written to ${outputFile}`);
+  } catch (err) {
+    console.error(`Failed to write results file: ${err}`);
+  }
 }
 
+/**
+ * Computes sensitivity summary for JSON output.
+ */
 function computeSensitivitySummary(results: AnalysisResult[]): Record<string, unknown[]> {
   const summary: Record<string, unknown[]> = {};
   for (const key of Object.keys(PARAM_GRID) as Array<keyof ReplayParams>) {

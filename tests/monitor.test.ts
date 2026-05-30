@@ -1,29 +1,30 @@
 'use strict';
-const { createTestConfig, createCtx, withPatchedMembers } = require('./_test_helpers');
-const assert = require('node:assert/strict');
-const test = require('node:test');
-const monitor = require('../monitor');
-const trading = require('../trading');
-const StateStore = require('../store');
+import { createTestConfig, createCtx, withPatchedMembers } from './_test_helpers.js';
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { monitorService } from '../src/services/monitor/monitor.service.js';
+import { tradingService } from '../src/services/trading/trading.service.js';
+import { StateStore } from '../src/core/store.js';
+import { Context, Position } from '../src/types/index.js';
 
 test('monitor mood adjustments reduce size after a cold streak and pause after a severe one', () => {
   const ctx = createCtx({}, { tradeHistory: [], moodPauseUntil: null });
 
-  assert.deepEqual(monitor.getMoodAdjustments(ctx), { isPaused: false, sizeMultiplier: 1 });
+  assert.deepEqual(monitorService.getMoodAdjustments(ctx), { isPaused: false, sizeMultiplier: 1 });
 
   ctx.state.tradeHistory = [true, false, false, false, false];
-  assert.equal(monitor.getMoodAdjustments(ctx).sizeMultiplier, 0.5);
+  assert.equal(monitorService.getMoodAdjustments(ctx).sizeMultiplier, 0.5);
 
   ctx.state.tradeHistory = [false, false, false, false, false, false, false, false, false, true];
-  assert.equal(monitor.getMoodAdjustments(ctx).isPaused, true);
+  assert.equal(monitorService.getMoodAdjustments(ctx).isPaused, true);
 });
 
 test('monitor take-profit helpers compute fractions and raw sell amounts', () => {
-  const position = { takeProfitFractions: [0.5, 0.2] };
+  const position = { takeProfitFractions: [0.5, 0.2] } as any;
 
-  assert.equal(monitor.getTakeProfitFraction(position, 0), 0.5);
-  assert.equal(monitor.getTakeProfitFraction(position, 1), 0.2);
-  assert.equal(monitor.computeTakeProfitSellAmount(10_000n, 0.5), 5_000n);
+  assert.equal(monitorService.getTakeProfitFraction(position, 0), 0.5);
+  assert.equal(monitorService.getTakeProfitFraction(position, 1), 0.2);
+  assert.equal(monitorService.computeTakeProfitSellAmount(10_000n, 0.5), 5_000n);
 });
 
 test('monitor derives score-based trade management profiles', () => {
@@ -35,21 +36,21 @@ test('monitor derives score-based trade management profiles', () => {
     holdDurationLowConfidenceMinutes: 4,
   });
 
-  const high = monitor.getTakeProfitPlan(ctx, 80);
+  const high = monitorService.getTakeProfitPlan(ctx, 80);
   assert.equal(high.profileId, 'high-confidence');
   assert.deepEqual(high.takeProfitMultiples, [1.5, 2.5]);
   assert.deepEqual(high.takeProfitFractions, [0.35, 0.35]);
   assert.equal(high.trailingStopDrawdownPct, 0.2);
   assert.equal(high.maxHoldMinutesResolved, 12);
 
-  const standard = monitor.getTakeProfitPlan(ctx, 66);
+  const standard = monitorService.getTakeProfitPlan(ctx, 66);
   assert.equal(standard.profileId, 'standard-confidence');
   assert.deepEqual(standard.takeProfitMultiples, [1.3, 2.1]);
   assert.deepEqual(standard.takeProfitFractions, [0.5, 0.3]);
   assert.equal(standard.trailingStopDrawdownPct, 0.16);
   assert.equal(standard.maxHoldMinutesResolved, 60);
 
-  const low = monitor.getTakeProfitPlan(ctx, 61);
+  const low = monitorService.getTakeProfitPlan(ctx, 61);
   assert.equal(low.profileId, 'fast-de-risk');
   assert.deepEqual(low.takeProfitMultiples, [1.2, 1.8]);
   assert.deepEqual(low.takeProfitFractions, [0.6, 0.25]);
@@ -101,8 +102,8 @@ test('monitor Insider Drift tracking logic triggers correctly', () => {
     ],
   };
 
-  const initial = pos.mintSignals.topAccounts[0];
-  const current = newSignals.topAccounts.find((a) => a.owner === initial.owner);
+  const initial = (pos.mintSignals.topAccounts as any)[0];
+  const current = (newSignals.topAccounts as any).find((a: any) => a.owner === initial.owner);
   const dropRatio = 1 - Number(current.rawAmount) / Number(initial.rawAmount);
 
   assert.ok(dropRatio > 0.25);
@@ -119,6 +120,7 @@ test('monitor closes live positions on stop-loss and records metrics', async () 
           {
             mint: 'LiveMint',
             symbol: 'LIVE',
+            name: 'Live Token',
             decimals: 6,
             openedAt: new Date(Date.now() - 65_000).toISOString(),
             entryPriceUsd: 1,
@@ -129,11 +131,30 @@ test('monitor closes live positions on stop-loss and records metrics', async () 
             lastKnownBalanceRaw: '100000000',
             targetsHit: 0,
             takeProfitMultiples: [1.5],
-          },
+            mode: 'live',
+          } as Position,
         ],
       ]),
       marketSnapshots: new Map(),
-      metrics: { profitableTrades: 0, stopLosses: 0, trailingExits: 0 },
+      metrics: {
+        profitableTrades: 0,
+        stopLosses: 0,
+        trailingExits: 0,
+        discoveredCandidates: 0,
+        passedCheapAudit: 0,
+        passedSurvival: 0,
+        passedAudit: 0,
+        boughtPositions: 0,
+        failedMomentum: 0,
+        buyAttempts: 0,
+        buyFailures: 0,
+        finalAuditQueued: 0,
+        finalAuditPassed: 0,
+        finalAuditDeferredIndexing: 0,
+        finalAuditRejected: 0,
+        exitReasonCounts: {},
+        rejectionReasons: {},
+      },
       tradeHistory: [],
       coolDownMints: new Map(),
     }
@@ -141,20 +162,26 @@ test('monitor closes live positions on stop-loss and records metrics', async () 
   let balanceCalls = 0;
 
   await withPatchedMembers(
-    trading,
+    tradingService,
     {
       estimateSolUsdPrice: async () => 200,
       fetchSwapOrder: async () => ({ transaction: 'mock-order' }),
       executeSwapOrder: async () => 'mock-signature',
+      executeSwapOrderWithSmartRetry: async () => ({
+        signature: 'mock-signature',
+        order: { transaction: 'mock-order' },
+      }),
       getWalletTokenBalance: async () => {
         balanceCalls++;
-        return balanceCalls === 1
+        return balanceCalls <= 2
           ? { mint: 'LiveMint', rawAmount: 100_000_000n, decimals: 6 }
           : { mint: 'LiveMint', rawAmount: 0n, decimals: 6 };
       },
     },
     async () => {
-      await monitor.monitorPositions(ctx, async () => ({ LiveMint: { usdPrice: 0.5 } }));
+      await monitorService.monitorPositions(ctx, async () => ({
+        LiveMint: { usdPrice: 0.5 } as any,
+      }));
       assert.equal(ctx.state.positions.has('LiveMint'), false);
       assert.equal(ctx.state.metrics.stopLosses, 1);
     }
@@ -171,6 +198,7 @@ test('monitor triggers stop-loss before the minimum hold time elapses', async ()
           {
             mint: 'FastStopMint',
             symbol: 'FSTOP',
+            name: 'Fast Stop',
             decimals: 6,
             openedAt: new Date(Date.now() - 20_000).toISOString(),
             entryPriceUsd: 1,
@@ -181,10 +209,29 @@ test('monitor triggers stop-loss before the minimum hold time elapses', async ()
             lastKnownBalanceRaw: '100000000',
             targetsHit: 0,
             takeProfitMultiples: [1.5],
-          },
+            mode: 'live',
+          } as Position,
         ],
       ]),
-      metrics: { profitableTrades: 0, stopLosses: 0, trailingExits: 0, exitReasonCounts: {} },
+      metrics: {
+        profitableTrades: 0,
+        stopLosses: 0,
+        trailingExits: 0,
+        discoveredCandidates: 0,
+        passedCheapAudit: 0,
+        passedSurvival: 0,
+        passedAudit: 0,
+        boughtPositions: 0,
+        failedMomentum: 0,
+        buyAttempts: 0,
+        buyFailures: 0,
+        finalAuditQueued: 0,
+        finalAuditPassed: 0,
+        finalAuditDeferredIndexing: 0,
+        finalAuditRejected: 0,
+        exitReasonCounts: {},
+        rejectionReasons: {},
+      },
       tradeHistory: [],
       coolDownMints: new Map(),
     }
@@ -192,20 +239,26 @@ test('monitor triggers stop-loss before the minimum hold time elapses', async ()
   let balanceCalls = 0;
 
   await withPatchedMembers(
-    trading,
+    tradingService,
     {
       estimateSolUsdPrice: async () => 200,
       fetchSwapOrder: async () => ({ transaction: 'mock-order' }),
       executeSwapOrder: async () => 'mock-signature',
+      executeSwapOrderWithSmartRetry: async () => ({
+        signature: 'mock-signature',
+        order: { transaction: 'mock-order' },
+      }),
       getWalletTokenBalance: async () => {
         balanceCalls++;
-        return balanceCalls === 1
+        return balanceCalls <= 2
           ? { mint: 'FastStopMint', rawAmount: 100_000_000n, decimals: 6 }
           : { mint: 'FastStopMint', rawAmount: 0n, decimals: 6 };
       },
     },
     async () => {
-      await monitor.monitorPositions(ctx, async () => ({ FastStopMint: { usdPrice: 0.79 } }));
+      await monitorService.monitorPositions(ctx, async () => ({
+        FastStopMint: { usdPrice: 0.79 } as any,
+      }));
       assert.equal(ctx.state.positions.has('FastStopMint'), false);
       assert.equal(ctx.state.metrics.stopLosses, 1);
       assert.equal(ctx.state.metrics.exitReasonCounts['stop-loss'], 1);
@@ -223,6 +276,7 @@ test('monitor triggers liquidity exits before the minimum hold time elapses', as
           {
             mint: 'FastLiquidityMint',
             symbol: 'FLIQ',
+            name: 'Fast Liquidity',
             decimals: 6,
             openedAt: new Date(Date.now() - 20_000).toISOString(),
             entryPriceUsd: 1,
@@ -234,11 +288,32 @@ test('monitor triggers liquidity exits before the minimum hold time elapses', as
             lastKnownBalanceRaw: '100000000',
             targetsHit: 0,
             takeProfitMultiples: [1.5],
-          },
+            mode: 'live',
+          } as Position,
         ],
       ]),
-      marketSnapshots: new Map([['FastLiquidityMint', { liquidity: 700, usdPrice: 0.95 }]]),
-      metrics: { profitableTrades: 0, stopLosses: 0, trailingExits: 0, exitReasonCounts: {} },
+      marketSnapshots: new Map([
+        ['FastLiquidityMint', { liquidityUsd: 700, usdPrice: 0.95 } as any],
+      ]),
+      metrics: {
+        profitableTrades: 0,
+        stopLosses: 0,
+        trailingExits: 0,
+        discoveredCandidates: 0,
+        passedCheapAudit: 0,
+        passedSurvival: 0,
+        passedAudit: 0,
+        boughtPositions: 0,
+        failedMomentum: 0,
+        buyAttempts: 0,
+        buyFailures: 0,
+        finalAuditQueued: 0,
+        finalAuditPassed: 0,
+        finalAuditDeferredIndexing: 0,
+        finalAuditRejected: 0,
+        exitReasonCounts: {},
+        rejectionReasons: {},
+      },
       tradeHistory: [],
       coolDownMints: new Map(),
     }
@@ -246,20 +321,26 @@ test('monitor triggers liquidity exits before the minimum hold time elapses', as
   let balanceCalls = 0;
 
   await withPatchedMembers(
-    trading,
+    tradingService,
     {
       estimateSolUsdPrice: async () => 200,
       fetchSwapOrder: async () => ({ transaction: 'mock-order' }),
       executeSwapOrder: async () => 'mock-signature',
+      executeSwapOrderWithSmartRetry: async () => ({
+        signature: 'mock-signature',
+        order: { transaction: 'mock-order' },
+      }),
       getWalletTokenBalance: async () => {
         balanceCalls++;
-        return balanceCalls === 1
+        return balanceCalls <= 2
           ? { mint: 'FastLiquidityMint', rawAmount: 100_000_000n, decimals: 6 }
           : { mint: 'FastLiquidityMint', rawAmount: 0n, decimals: 6 };
       },
     },
     async () => {
-      await monitor.monitorPositions(ctx, async () => ({ FastLiquidityMint: { usdPrice: 0.95 } }));
+      await monitorService.monitorPositions(ctx, async () => ({
+        FastLiquidityMint: { usdPrice: 0.95 } as any,
+      }));
       assert.equal(ctx.state.positions.has('FastLiquidityMint'), false);
       assert.equal(ctx.state.metrics.exitReasonCounts['liquidity-exit'], 1);
     }
@@ -276,6 +357,7 @@ test('monitor does not trigger time-exit before the minimum hold time elapses', 
           {
             mint: 'TimeGateMint',
             symbol: 'TGATE',
+            name: 'Time Gate',
             decimals: 6,
             openedAt: new Date(Date.now() - 65_000).toISOString(),
             entryPriceUsd: 1,
@@ -288,26 +370,48 @@ test('monitor does not trigger time-exit before the minimum hold time elapses', 
             takeProfitMultiples: [1.5],
             trailingArmed: false,
             maxHoldMinutesResolved: 1,
-          },
+            mode: 'paper',
+          } as Position,
         ],
       ]),
-      metrics: { profitableTrades: 0, stopLosses: 0, trailingExits: 0, exitReasonCounts: {} },
+      metrics: {
+        profitableTrades: 0,
+        stopLosses: 0,
+        trailingExits: 0,
+        discoveredCandidates: 0,
+        passedCheapAudit: 0,
+        passedSurvival: 0,
+        passedAudit: 0,
+        boughtPositions: 0,
+        failedMomentum: 0,
+        buyAttempts: 0,
+        buyFailures: 0,
+        finalAuditQueued: 0,
+        finalAuditPassed: 0,
+        finalAuditDeferredIndexing: 0,
+        finalAuditRejected: 0,
+        exitReasonCounts: {},
+        rejectionReasons: {},
+      },
       tradeHistory: [],
       coolDownMints: new Map(),
     }
   );
 
   await withPatchedMembers(
-    trading,
+    tradingService,
     {
       getWalletTokenBalance: async () => ({
         mint: 'TimeGateMint',
         rawAmount: 100_000_000n,
         decimals: 6,
+        uiAmount: 100,
       }),
     },
     async () => {
-      await monitor.monitorPositions(ctx, async () => ({ TimeGateMint: { usdPrice: 1.1 } }));
+      await monitorService.monitorPositions(ctx, async () => ({
+        TimeGateMint: { usdPrice: 1.1 } as any,
+      }));
       assert.equal(ctx.state.positions.has('TimeGateMint'), true);
       assert.equal(ctx.state.metrics.exitReasonCounts['time-exit'], undefined);
     }
@@ -315,18 +419,18 @@ test('monitor does not trigger time-exit before the minimum hold time elapses', 
 });
 
 test('monitor recordClosedTrade enriches data and journals to trade-history file', () => {
-  const ctx = createTestConfig({ tradeJournalFile: 'mock-trade-history.jsonl' });
-  const store = new StateStore(ctx);
+  const config = createTestConfig({ tradeJournalFile: 'mock-trade-history.jsonl' });
+  const store = new StateStore(config);
   const state = store.state;
   const testCtx = {
-    config: ctx,
+    config,
     state,
     store,
     logger: () => {},
-    persistState: () => {},
-  };
+    persistState: async () => {},
+  } as unknown as Context;
 
-  const pos = {
+  const pos: Partial<Position> = {
     mint: 'JournalMint',
     symbol: 'JRN',
     openedAt: new Date(Date.now() - 120_000).toISOString(),
@@ -348,10 +452,10 @@ test('monitor recordClosedTrade enriches data and journals to trade-history file
     initialBuyAmountSol: '0.05',
   };
 
-  monitor.recordClosedTrade(testCtx, pos, 'stop-loss');
+  monitorService.recordClosedTrade(testCtx, pos as Position, 'stop-loss');
 
   assert.equal(state.closedTrades.length, 1);
-  const trade = state.closedTrades[0];
+  const trade = state.closedTrades[0]!;
   assert.equal(trade.mint, 'JournalMint');
   assert.equal(trade.entryScore, 80);
   assert.equal(trade.tpProfile, 'high-confidence');

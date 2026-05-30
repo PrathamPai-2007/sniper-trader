@@ -1,27 +1,50 @@
 'use strict';
 
-global.__TEST__ = true;
+(global as any).__TEST__ = true;
 
-const path = require('node:path');
+import path from 'node:path';
+import {
+  Config,
+  State,
+  Context,
+  Position,
+  MarketSnapshot,
+  RecheckItem,
+} from '../src/types/index.js';
+import { StateStore } from '../src/core/store.js';
+import * as bot from '../src/index.js';
 
-function createTestConfig(overrides = {}) {
+export function createTestConfig(overrides: Partial<Config> = {}): Config {
   const rpcUrl = 'http://localhost:8899';
   return {
+    strategyName: 'test',
     logFile: path.join(process.cwd(), '.test-artifacts', 'bot.log'),
     stateFile: '',
     metricsFile: '',
     mintsFile: '',
+    scannedTokensFile: '',
+    paperTradeJournalFile: '',
+    tradeJournalFile: '',
+    performanceStatsFile: '',
+    sessionDir: '',
+    stateFlushIntervalMs: 250,
     jupiterBaseUrl: 'http://mock',
     jupiterApiKey: 'test-key',
     jupiterPositionApiKey: 'position-key',
+    goPlusBaseUrl: 'http://mock-goplus',
+    bubbleMapsBaseUrl: 'http://mock-bubblemaps',
+    goPlusAccessToken: '',
+    bubbleMapsApiKey: '',
+    minBubbleMapsScore: 0,
+    maxBubbleMapsLargestClusterShare: 100,
     rpcUrl,
     rpcUrls: [rpcUrl],
     wsRpcUrl: 'ws://localhost:8900',
     wsRpcUrls: ['ws://localhost:8900'],
-    buyAmountLamports: '50000000',
+    buyAmountLamports: 50_000_000n,
     buyAmountSolText: '0.05',
     initialPaperSolText: '0.1',
-    initialPaperSolLamports: '100000000',
+    initialPaperSolLamports: 100_000_000n,
     paperTrading: true,
     dryRun: false,
     liveTradingEnabled: false,
@@ -91,10 +114,21 @@ function createTestConfig(overrides = {}) {
     rpcIndexingRetryDelayMs: 15_000,
     maxRecheckAttempts: 5,
     borderlineRecheckMaxAttempts: 3,
+    maxAutoSlippageRetry: 3,
+    autoSlippageIncrementBps: 100,
     priorityFeeBaseMicroLamports: 25_000,
     priorityFeeMaxMicroLamports: 5_000_000,
     priorityFeePanicMultiplier: 2,
     priorityFeePercentile: 75,
+    useJito: false,
+    jitoTipLamports: 1_000_000n,
+    jitoBlockEngineUrl: 'http://mock-jito',
+    jitoTipPercentile: 75,
+    jitoTipFloorApiUrl: '',
+    jitoConfirmTimeoutMs: 30000,
+    jitoBundleRetryAttempts: 3,
+    priorityFeeAccountLocal: true,
+    priorityFeeVolatilityMultiplier: 1.0,
     maxOpenPositions: 10,
     maxBuysPerScan: 2,
     maxCandidatesPerScan: 15,
@@ -110,24 +144,41 @@ function createTestConfig(overrides = {}) {
     maxBuyTopGrowthPct: 120,
     buyTopAthBufferPct: 2,
     buyingTheTopSlPct: 25,
-    backtestSolUsdPrice: 150,
+    discoveryWsEnabled: true,
+    discoveryPumpEnabled: true,
+    discoveryRaydiumEnabled: true,
+    discoveryMeteoraEnabled: true,
+    useJupiterSdk: false,
+    inlineSwapSimulation: true,
+    backgroundAtaClose: true,
+    privateKey: '',
+    privateKeyPath: '',
+    telegramBotToken: '',
+    telegramChatId: '',
+    discordWebhookUrl: '',
+    maxDailyDrawdownPct: 0.15,
+    maxPositionsPerLaunchpad: 3,
+    dynamicSizingEnabled: true,
     ...overrides,
-  };
+  } as Config;
 }
 
-function createState(overrides = {}) {
+export function createState(overrides: Partial<State> = {}): State {
   return {
     processedMintQueue: [],
-    processedMints: new Set(),
-    pendingCandidateRechecks: new Map(),
-    positions: new Map(),
-    marketSnapshots: new Map(),
+    processedMints: new Set<string>(),
+    pendingCandidateRechecks: new Map<string, RecheckItem>(),
+    positions: new Map<string, Position>(),
+    marketSnapshots: new Map<string, MarketSnapshot>(),
     paperSolBalanceLamports: '1000000000',
     tradeHistory: [],
     moodPauseUntil: null,
     coolDownMints: new Map(),
     retiredMints: new Map(),
     closedTrades: [],
+    launchHistory: [],
+    sessionStartingSolBalanceLamports: null,
+    peakSessionSolBalanceLamports: null,
     metrics: {
       discoveredCandidates: 0,
       passedCheapAudit: 0,
@@ -151,27 +202,52 @@ function createState(overrides = {}) {
   };
 }
 
-function createCtx(configOverrides = {}, stateOverrides = {}) {
+export function createCtx(
+  configOverrides: Partial<Config> = {},
+  stateOverrides: Partial<State> = {}
+): Context {
   const config = createTestConfig(configOverrides);
-  const StateStore = require('../store');
   const store = new StateStore(config);
   Object.assign(store.state, createState(stateOverrides));
+
+  // A functional proxy for mock RPC methods that returns a .send() method
+  const rpcProxy = new Proxy(
+    {},
+    {
+      get: (_target, prop) => {
+        return () => ({
+          send: async () => {
+            if (prop === 'getTokenAccountsByOwner') return { value: [] };
+            return { value: { blockhash: '1'.repeat(32), lastValidBlockHeight: 12345 } };
+          },
+        });
+      },
+    }
+  );
+
   return {
     config,
     state: store.state,
     store,
-    rpc: {},
-    rpcs: [],
-    wallet: { address: 'mock-wallet' },
+    rpc: rpcProxy as any,
+    rpcs: [rpcProxy as any],
+    rpcSubscriptions: {} as any,
+    rpcSubscriptionPool: [],
+    wallet: { address: '5U3D1bg3jFL2n3zPXSkwQnQKvU4uEPrKzJ6aXvQf6tTq' },
     logger: () => {},
-    persistState: () => {},
+    persistState: async () => {},
     calculateGMI: () => 0.5,
+    rotateRpcSubscriptions: () => {},
+    getCurrentRpcSubscriptions: () => ({}) as any,
   };
 }
 
-async function withMockedFetch(handler, fn) {
+export async function withMockedFetch<T>(
+  handler: (input: any, init?: any) => Promise<Response>,
+  fn: () => Promise<T>
+): Promise<T> {
   const originalFetch = global.fetch;
-  global.fetch = handler;
+  global.fetch = handler as any;
   try {
     return await fn();
   } finally {
@@ -179,7 +255,11 @@ async function withMockedFetch(handler, fn) {
   }
 }
 
-async function withPatchedMembers(target, patches, fn) {
+export async function withPatchedMembers<T>(
+  target: any,
+  patches: Record<string, any>,
+  fn: () => Promise<T>
+): Promise<T> {
   const originals = new Map();
   for (const [key, value] of Object.entries(patches)) {
     originals.set(key, target[key]);
@@ -194,41 +274,41 @@ async function withPatchedMembers(target, patches, fn) {
   }
 }
 
-function seedBotState(configOverrides = {}, stateOverrides = {}) {
+export function seedBotState(
+  configOverrides: Partial<Config> = {},
+  stateOverrides: Partial<State> = {}
+) {
   const config = createTestConfig(configOverrides);
-  const StateStore = require('../store');
   const store = new StateStore(config);
   Object.assign(store.state, createState(stateOverrides));
-  const bot = require('../bot');
+
   bot._setTestConfig(config);
   bot._setTestState(store.state);
-  const originals = { getCtx: bot.getCtx };
-  bot.getCtx = () => ({
+
+  const ctx: Context = {
     config,
     state: store.state,
     store,
-    rpc: {},
+    rpc: {} as any,
     rpcs: [],
-    wallet: { address: 'mock-wallet' },
+    rpcSubscriptions: {} as any,
+    rpcSubscriptionPool: [],
+    wallet: { address: '11111111111111111111111111111111' },
     logger: () => {},
-    persistState: () => {},
+    persistState: async () => {},
     calculateGMI: store.calculateGMI.bind(store),
-  });
+    rotateRpcSubscriptions: () => {},
+    getCurrentRpcSubscriptions: () => ({}) as any,
+  };
+
+  bot._setTestCtx(ctx);
+
   return {
     config,
     state: store.state,
     store,
     cleanup: () => {
-      bot.getCtx = originals.getCtx;
+      bot._setTestCtx(null);
     },
   };
 }
-
-module.exports = {
-  createTestConfig,
-  createState,
-  createCtx,
-  withMockedFetch,
-  withPatchedMembers,
-  seedBotState,
-};

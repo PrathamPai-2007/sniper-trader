@@ -1,8 +1,8 @@
 import path from 'node:path';
 import fs from 'node:fs';
-import { address } from '@solana/addresses';
+import yaml from 'js-yaml';
 import { decimalToAtomic, deriveWsRpcUrl } from './utils.js';
-import { Config, LaunchpadProfile } from '../types/index.js';
+import { Config, LaunchpadProfile, PresetStrategy } from '../types/index.js';
 
 // --- Environment Loading ---
 
@@ -39,21 +39,57 @@ function loadDotEnv(): void {
 
 loadDotEnv();
 
+/**
+ * The mint address for native SOL on Solana.
+ */
 export const SOL_MINT = 'So11111111111111111111111111111111111111112';
+
+/**
+ * Common constants used across the application.
+ */
 export const constants = { SOL_MINT };
+
+/**
+ * Default state file path (relative to session directory).
+ */
 export const DEFAULT_STATE_FILE = '';
+
+/**
+ * Maximum number of mints to track in memory to prevent memory exhaustion.
+ */
 export const MAX_TRACKED_MINTS = 5_000;
 
+/**
+ * Default multiples for take-profit sell orders.
+ */
 export const TAKE_PROFIT_MULTIPLES = [1.5];
+
+/**
+ * Fraction of the position to sell at each take-profit level.
+ */
 export const TAKE_PROFIT_FRACTION = 0.6;
+
+/**
+ * Percentage of the position to sell at each take-profit level.
+ */
 export const TP_SELL_PERCENT = Math.round(TAKE_PROFIT_FRACTION * 100);
+
+/**
+ * Percentage of the position to hold after a take-profit sell.
+ */
 export const TP_HOLD_PERCENT = 100 - TP_SELL_PERCENT;
 
+/**
+ * Known addresses representing burned or null owners.
+ */
 export const BURN_OWNERS = new Set<string>([
   '11111111111111111111111111111111',
   '1nc1nerator11111111111111111111111111111111',
 ]);
 
+/**
+ * Default keywords used to identify meme-related tokens.
+ */
 export const DEFAULT_MEME_KEYWORDS = [
   'ai',
   'ape',
@@ -74,6 +110,9 @@ export const DEFAULT_MEME_KEYWORDS = [
   'wojak',
 ];
 
+/**
+ * Scoring and liquidity profiles for various launchpads and AMMs.
+ */
 export const DEFAULT_LAUNCHPAD_PROFILES: Record<string, LaunchpadProfile> = {
   'pump.fun': {
     scoreBonus: 10,
@@ -112,27 +151,82 @@ export const DEFAULT_LAUNCHPAD_PROFILES: Record<string, LaunchpadProfile> = {
   },
 };
 
+/**
+ * Program IDs for SPL Token and Token-2022 programs.
+ */
 export const SPL_TOKEN_PROGRAM_IDS = [
-  address('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
-  address('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'),
+  'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+  'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb',
 ];
 
-export const PUMP_FUN_PROGRAM_ID = address('6EF8rrecth7QZ77z27Y9RQmP22JdK89pX6X1N1B8bN2');
-export const RAYDIUM_AMM_V4_PROGRAM_ID = address('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
-export const METEORA_DLMM_PROGRAM_ID = address('LBUZPB6S7GrLs9haYv94LMc6Zz21U9F7r5Q7oJCcG6T');
+/**
+ * Program ID for Pump.fun.
+ */
+export const PUMP_FUN_PROGRAM_ID = '6EF8rrecth7QZ77z27Y9RQmP22JdK89pX6X1N1B8bN2';
 
+/**
+ * Program ID for Raydium AMM V4.
+ */
+export const RAYDIUM_AMM_V4_PROGRAM_ID = '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8';
+
+/**
+ * Program ID for Meteora DLMM.
+ */
+export const METEORA_DLMM_PROGRAM_ID = 'LBUZPB6S7GrLs9haYv94LMc6Zz21U9F7r5Q7oJCcG6T';
+
+/**
+ * Regex to detect token initialization instructions in transaction logs.
+ */
 export const INITIALIZE_MINT_LOG_PATTERN = /Instruction:\s+InitializeMint2?/i;
+
+/**
+ * Regex to detect Pump.fun create instructions in transaction logs.
+ */
 export const PUMP_FUN_CREATE_LOG_PATTERN = /Instruction:\s+Create/i;
+
+/**
+ * Regex to extract the mint address from Pump.fun create log messages.
+ */
 export const PUMP_FUN_MINT_LOG_PATTERN = /Program log:\s+Create\s+\{.*mint:\s*([\w\d]+)/i;
+
+/**
+ * Regex to detect Raydium AMM V4 initialization instructions in transaction logs.
+ */
 export const RAYDIUM_INIT_LOG_PATTERN = /Instruction:\s+(?:Initialize2|Monitor)/i;
+
+/**
+ * Regex to detect Meteora DLMM initialization instructions in transaction logs.
+ */
 export const METEORA_INIT_LOG_PATTERN = /Instruction:\s+(?:Initialize|CreateLbPair)/i;
 
+/**
+ * Time duration to retain discovery signals in memory.
+ */
 export const DISCOVERY_SIGNAL_RETENTION_MS = 10 * 60 * 1000;
+
+/**
+ * Time duration to retain market snapshots in memory.
+ */
 export const MARKET_SNAPSHOT_RETENTION_MS = 60 * 60 * 1000;
+
+/**
+ * Default timeout for HTTP fetch operations.
+ */
 export const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
+
+/**
+ * Default number of retries for HTTP fetch operations.
+ */
 export const DEFAULT_FETCH_RETRIES = 2;
+
+/**
+ * Default delay between retries for HTTP fetch operations.
+ */
 export const DEFAULT_FETCH_RETRY_DELAY_MS = 750;
 
+/**
+ * Weights used in the scoring algorithm for new tokens.
+ */
 export const SCORING_WEIGHTS = {
   socialLinkHigh: 15,
   socialLinkLow: 5,
@@ -142,6 +236,9 @@ export const SCORING_WEIGHTS = {
   liquidityRatioLow: 5,
 };
 
+/**
+ * Thresholds for determining market "mood" and adjusting trading behavior.
+ */
 export const MOOD_THRESHOLDS = {
   winRateCritical: 0.2,
   winRateCautious: 0.4,
@@ -150,6 +247,9 @@ export const MOOD_THRESHOLDS = {
   windowSmall: 5,
 };
 
+/**
+ * Configuration for momentum-based filters and guards.
+ */
 export const MOMENTUM_FILTERS = {
   minAccelerationFactor: 0.3,
   minBuysFirstHalf: 5,
@@ -159,96 +259,143 @@ export const MOMENTUM_FILTERS = {
   minMidpointGuardDelayMs: 2000,
 };
 
-interface PresetStrategy {
-  minLiquidityUsd: number;
-  minHolderCount: number;
-  maxRecheckAttempts: number;
-  minCandidateScore: number;
-  stopLossPct: number;
-  takeProfitMultiples: number[];
-  survivalDelaySeconds: number;
-  maxOpenPositions: number;
-  minSurvivalMomentum: number;
-  minBreakoutMultiplier: number;
-  maxPriceDumpPct: number;
-  maxSurvivalGrowthPct: number;
-  maxSellPressureIncreasePct: number;
-  maxAuditTopHoldersPct: number;
-  minMomentumConsistency: number;
-  minAccelerationFactor: number;
-  maxConcurrentAudits: number;
-  scanParallelismLight: number;
-  scanParallelismHeavy: number;
-  ownerAuditParallelism: number;
-  priceFallbackParallelism: number;
-  parallelismMinFactor: number;
-  errorRateWindow: number;
-  backpressureErrorRateThreshold: number;
-  mintSignalMaxAttempts: number;
-  mintSignalRetryDelayMs: number;
-  rpcIndexingRetryDelayMs: number;
+/**
+ * The default trading strategy configuration used if no custom strategy is specified.
+ */
+const DEFAULT_STRATEGY: PresetStrategy = {
+  name: 'Standard Aggressive',
+  description: 'Standard balanced strategy for mid-cap Solana memecoins',
+  minLiquidityUsd: 500,
+  minHolderCount: 12,
+  maxRecheckAttempts: 6,
+  minCandidateScore: 64,
+  stopLossPct: 0.18,
+  takeProfitMultiples: [1.3, 2.1],
+  survivalDelaySeconds: 20,
+  maxOpenPositions: 5,
+  minSurvivalMomentum: 1.13,
+  minBreakoutMultiplier: 1.05,
+  maxPriceDumpPct: 18,
+  maxSurvivalGrowthPct: 450,
+  maxSellPressureIncreasePct: 110,
+  maxAuditTopHoldersPct: 65,
+  minMomentumConsistency: 0.65,
+  minAccelerationFactor: 0.3,
+  maxConcurrentAudits: 20,
+  scanParallelismLight: 10,
+  scanParallelismHeavy: 4,
+  ownerAuditParallelism: 3,
+  priceFallbackParallelism: 1,
+  parallelismMinFactor: 0.55,
+  errorRateWindow: 30,
+  backpressureErrorRateThreshold: 0.22,
+  mintSignalMaxAttempts: 2,
+  mintSignalRetryDelayMs: 500,
+  rpcIndexingRetryDelayMs: 5_000,
+};
+
+/**
+ * Validates a strategy object for correctness and safety.
+ * @param strategy - The strategy object to validate.
+ */
+export function validateStrategy(strategy: PresetStrategy): void {
+  const errors: string[] = [];
+
+  if (
+    !Number.isFinite(strategy.stopLossPct) ||
+    strategy.stopLossPct <= 0 ||
+    strategy.stopLossPct >= 1
+  ) {
+    errors.push('stopLossPct must be between 0 and 1 (exclusive).');
+  }
+
+  if (
+    !Array.isArray(strategy.takeProfitMultiples) ||
+    strategy.takeProfitMultiples.length === 0 ||
+    strategy.takeProfitMultiples.some((v) => !Number.isFinite(v) || v <= 1)
+  ) {
+    errors.push('takeProfitMultiples must contain one or more values greater than 1.');
+  }
+
+  const positiveFields: Array<keyof PresetStrategy> = [
+    'minLiquidityUsd',
+    'minHolderCount',
+    'maxRecheckAttempts',
+    'minCandidateScore',
+    'survivalDelaySeconds',
+    'maxOpenPositions',
+    'minSurvivalMomentum',
+    'minBreakoutMultiplier',
+    'maxPriceDumpPct',
+    'maxSurvivalGrowthPct',
+    'maxSellPressureIncreasePct',
+    'maxAuditTopHoldersPct',
+    'minMomentumConsistency',
+    'minAccelerationFactor',
+    'maxConcurrentAudits',
+    'scanParallelismLight',
+    'scanParallelismHeavy',
+    'ownerAuditParallelism',
+    'priceFallbackParallelism',
+    'mintSignalMaxAttempts',
+    'mintSignalRetryDelayMs',
+    'rpcIndexingRetryDelayMs',
+  ];
+
+  for (const field of positiveFields) {
+    const value = strategy[field];
+    if (typeof value === 'number' && (!Number.isFinite(value) || value < 0)) {
+      errors.push(`${String(field)} must be a non-negative number.`);
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`Strategy validation failed:\n- ${errors.join('\n- ')}`);
+  }
 }
 
-export const STRATEGY_PRESETS: Record<string, PresetStrategy> = {
-  conservative: {
-    minLiquidityUsd: 500,
-    minHolderCount: 12,
-    maxRecheckAttempts: 6,
-    minCandidateScore: 64,
-    stopLossPct: 0.14,
-    takeProfitMultiples: [1.3, 2.1],
-    survivalDelaySeconds: 20,
-    maxOpenPositions: 5,
-    minSurvivalMomentum: 1.16,
-    minBreakoutMultiplier: 1.05,
-    maxPriceDumpPct: 18,
-    maxSurvivalGrowthPct: 450,
-    maxSellPressureIncreasePct: 110,
-    maxAuditTopHoldersPct: 58,
-    minMomentumConsistency: 0.65,
-    minAccelerationFactor: 0.3,
-    maxConcurrentAudits: 20,
-    scanParallelismLight: 18,
-    scanParallelismHeavy: 4,
-    ownerAuditParallelism: 3,
-    priceFallbackParallelism: 6,
-    parallelismMinFactor: 0.55,
-    errorRateWindow: 30,
-    backpressureErrorRateThreshold: 0.22,
-    mintSignalMaxAttempts: 2,
-    mintSignalRetryDelayMs: 500,
-    rpcIndexingRetryDelayMs: 5_000,
-  },
-  standard: {
-    minLiquidityUsd: 500,
-    minHolderCount: 12,
-    maxRecheckAttempts: 6,
-    minCandidateScore: 64,
-    stopLossPct: 0.18,
-    takeProfitMultiples: [1.3, 2.1],
-    survivalDelaySeconds: 20,
-    maxOpenPositions: 5,
-    minSurvivalMomentum: 1.13,
-    minBreakoutMultiplier: 1.05,
-    maxPriceDumpPct: 18,
-    maxSurvivalGrowthPct: 450,
-    maxSellPressureIncreasePct: 110,
-    maxAuditTopHoldersPct: 65,
-    minMomentumConsistency: 0.65,
-    minAccelerationFactor: 0.3,
-    maxConcurrentAudits: 20,
-    scanParallelismLight: 18,
-    scanParallelismHeavy: 4,
-    ownerAuditParallelism: 3,
-    priceFallbackParallelism: 6,
-    parallelismMinFactor: 0.55,
-    errorRateWindow: 30,
-    backpressureErrorRateThreshold: 0.22,
-    mintSignalMaxAttempts: 2,
-    mintSignalRetryDelayMs: 500,
-    rpcIndexingRetryDelayMs: 5_000,
-  },
-};
+/**
+ * Loads a strategy from the strategies/ directory.
+ * @param name - The name of the strategy (filename without .yaml).
+ */
+export function loadStrategy(name: string): PresetStrategy {
+  const strategyPath = path.resolve(process.cwd(), 'strategies', `${name}.yaml`);
+  let strategy: PresetStrategy;
+
+  if (!fs.existsSync(strategyPath)) {
+    if (name === 'standard') {
+      strategy = DEFAULT_STRATEGY;
+    } else {
+      console.warn(`[CONFIG] Strategy file not found: ${strategyPath}. Falling back to standard.`);
+      strategy = loadStrategy('standard');
+    }
+  } else {
+    try {
+      const content = fs.readFileSync(strategyPath, 'utf8');
+      const parsed = yaml.load(content) as Partial<PresetStrategy>;
+      strategy = { ...DEFAULT_STRATEGY, ...parsed };
+    } catch (err: unknown) {
+      console.error(
+        `[CONFIG] Failed to parse strategy file ${strategyPath}: ${err instanceof Error ? err.message : String(err)}`
+      );
+      strategy = DEFAULT_STRATEGY;
+    }
+  }
+
+  try {
+    validateStrategy(strategy);
+  } catch (err: unknown) {
+    console.error(
+      `[CONFIG] Strategy validation failed for "${name}": ${err instanceof Error ? err.message : String(err)}`
+    );
+    if (name !== 'standard') {
+      return loadStrategy('standard');
+    }
+    throw err; // If standard fails validation, we have a critical error.
+  }
+
+  return strategy;
+}
 
 /**
  * Retrieves a required environment variable or throws an error.
@@ -298,7 +445,7 @@ function booleanFromEnv(name: string, fallback: boolean): boolean {
  */
 export function loadConfig(): Config {
   const strategyName = (process.env.STRATEGY || 'standard').toLowerCase();
-  const preset = (STRATEGY_PRESETS[strategyName] || STRATEGY_PRESETS.standard) as PresetStrategy;
+  const preset = loadStrategy(strategyName);
 
   const rpcUrlRaw = requireEnv('RPC_URL');
   const rpcUrls = rpcUrlRaw
@@ -318,9 +465,13 @@ export function loadConfig(): Config {
   const jupiterPositionApiKey = process.env.JUPITER_POSITION_API_KEY || jupiterApiKey;
   const privateKey = process.env.PRIVATE_KEY || '';
   const privateKeyPath = process.env.PRIVATE_KEY_PATH || '';
+  const keystorePath = process.env.KEYSTORE_PATH || '';
+  const keystorePassword = process.env.KEYSTORE_PASSWORD || '';
 
-  if (!privateKey && !privateKeyPath) {
-    throw new Error('Startup configuration error: PRIVATE_KEY or PRIVATE_KEY_PATH is required.');
+  if (!privateKey && !privateKeyPath && !keystorePath) {
+    throw new Error(
+      'Startup configuration error: PRIVATE_KEY, PRIVATE_KEY_PATH, or KEYSTORE_PATH is required.'
+    );
   }
 
   const buyAmountText = process.env.BUY_AMOUNT_SOL || '0.05';
@@ -330,8 +481,8 @@ export function loadConfig(): Config {
     );
   }
 
-  const scanIntervalMs = numberFromEnv('SCAN_INTERVAL_MS', 5000);
-  const discoveryPollIntervalMs = numberFromEnv('DISCOVERY_POLL_INTERVAL_MS', 30000);
+  const scanIntervalMs = numberFromEnv('SCAN_INTERVAL_MS', 15000);
+  const discoveryPollIntervalMs = numberFromEnv('DISCOVERY_POLL_INTERVAL_MS', 20000);
 
   const paperTrading = booleanFromEnv('PAPER_TRADING', false);
   // Each run gets an isolated session directory so state, metrics, and journals do not overwrite prior runs.
@@ -399,7 +550,7 @@ export function loadConfig(): Config {
     ),
     maxOpenPositions: numberFromEnv('MAX_OPEN_POSITIONS', preset.maxOpenPositions),
     maxBuysPerScan: numberFromEnv('MAX_BUYS_PER_SCAN', 2),
-    maxCandidatesPerScan: numberFromEnv('MAX_CANDIDATES_PER_SCAN', 15),
+    maxCandidatesPerScan: numberFromEnv('MAX_CANDIDATES_PER_SCAN', 5),
     dryRun: booleanFromEnv('DRY_RUN', true),
     paperTrading,
     liveTradingEnabled: booleanFromEnv('LIVE_TRADING_ENABLED', false),
@@ -413,6 +564,7 @@ export function loadConfig(): Config {
     tradeJournalFile: path.join(sessionDir, 'trade-journal.jsonl'),
     performanceStatsFile: path.join(sessionDir, 'performance-stats.json'),
     metricsFile: path.join(sessionDir, 'metrics.json'),
+    stateFlushIntervalMs: numberFromEnv('STATE_FLUSH_INTERVAL_MS', 250),
     minLiquidityUsd: numberFromEnv('MIN_LIQUIDITY_USD', preset.minLiquidityUsd),
     minOrganicScore: numberFromEnv('MIN_ORGANIC_SCORE', 0),
     minHolderCount: numberFromEnv('MIN_HOLDER_COUNT', preset.minHolderCount),
@@ -443,7 +595,7 @@ export function loadConfig(): Config {
     maxExhaustionRangePct: numberFromEnv('MAX_EXHAUSTION_RANGE_PCT', 1.6),
     highGrowthConfidenceScore: numberFromEnv('HIGH_GROWTH_CONFIDENCE_SCORE', 70),
     borderlineRecheckEnabled: booleanFromEnv('BORDERLINE_RECHECK_ENABLED', true),
-    borderlineRecheckMinDelayMs: numberFromEnv('BORDERLINE_RECHECK_MIN_DELAY_MS', 10_000),
+    borderlineRecheckMinDelayMs: numberFromEnv('BORDERLINE_RECHECK_MIN_DELAY_MS', 8_000),
     borderlineRecheckMaxDelayMs: numberFromEnv('BORDERLINE_RECHECK_MAX_DELAY_MS', 20_000),
     borderlineRecheckMaxAttempts: numberFromEnv('BORDERLINE_RECHECK_MAX_ATTEMPTS', 6),
     borderlineThresholdBufferRatio: numberFromEnv('BORDERLINE_THRESHOLD_BUFFER_PCT', 20) / 100,
@@ -482,7 +634,7 @@ export function loadConfig(): Config {
     recheckPriceDropPct: numberFromEnv('RECHECK_PRICE_DROP_PCT', 15),
     moodPauseDurationMinutes: numberFromEnv('MOOD_PAUSE_DURATION_MINUTES', 60),
     coolDownMinutes: numberFromEnv('COOL_DOWN_MINUTES', 20),
-    holderCountWaitlistSeconds: numberFromEnv('HOLDER_COUNT_WAITLIST_SECONDS', 60),
+    holderCountWaitlistSeconds: numberFromEnv('HOLDER_COUNT_WAITLIST_SECONDS', 33),
     reentryDipPct: numberFromEnv('REENTRY_DIP_PCT', 15),
     reentryBreakoutPct: numberFromEnv('REENTRY_BREAKOUT_PCT', 20),
     maxSurvivalGrowthPct: numberFromEnv('MAX_SURVIVAL_GROWTH_PCT', preset.maxSurvivalGrowthPct),
@@ -495,13 +647,32 @@ export function loadConfig(): Config {
     priorityFeeMaxMicroLamports: numberFromEnv('PRIORITY_FEE_MAX_MICRO_LAMPORTS', 5_000_000),
     priorityFeePanicMultiplier: numberFromEnv('PRIORITY_FEE_PANIC_MULTIPLIER', 2.0),
     priorityFeePercentile: numberFromEnv('PRIORITY_FEE_PERCENTILE', 75),
+    useJito: booleanFromEnv('USE_JITO', false),
+    jitoTipLamports: BigInt(decimalToAtomic(process.env.JITO_TIP_SOL || '0.001', 9)),
+    jitoBlockEngineUrl:
+      process.env.JITO_BLOCK_ENGINE_URL || 'https://mainnet.block-engine.jito.wtf/api/v1/bundles',
+    jitoTipPercentile: numberFromEnv('JITO_TIP_PERCENTILE', 75),
+    jitoTipFloorApiUrl: process.env.JITO_TIP_FLOOR_API_URL || '',
+    jitoConfirmTimeoutMs: numberFromEnv('JITO_CONFIRM_TIMEOUT_MS', 30000),
+    jitoBundleRetryAttempts: numberFromEnv('JITO_BUNDLE_RETRY_ATTEMPTS', 3),
+    priorityFeeAccountLocal: booleanFromEnv('PRIORITY_FEE_ACCOUNT_LOCAL', true),
+    priorityFeeVolatilityMultiplier: numberFromEnv('PRIORITY_FEE_VOLATILITY_MULTIPLIER', 1.0),
+    maxAutoSlippageRetry: numberFromEnv('MAX_AUTO_SLIPPAGE_RETRY', 3),
+    autoSlippageIncrementBps: numberFromEnv('AUTO_SLIPPAGE_INCREMENT_BPS', 100),
     useJupiterSdk: booleanFromEnv('USE_JUPITER_SDK', false),
+    inlineSwapSimulation: booleanFromEnv('INLINE_SWAP_SIMULATION', true),
+    backgroundAtaClose: booleanFromEnv('BACKGROUND_ATA_CLOSE', true),
     closePositionsOnShutdown: booleanFromEnv('CLOSE_POSITIONS_ON_SHUTDOWN', true),
     privateKey,
     privateKeyPath,
+    keystorePath,
+    keystorePassword,
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
     telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
     discordWebhookUrl: process.env.DISCORD_WEBHOOK_URL || '',
+    maxDailyDrawdownPct: numberFromEnv('MAX_DAILY_DRAWDOWN_PCT', 0.15),
+    maxPositionsPerLaunchpad: numberFromEnv('MAX_POSITIONS_PER_LAUNCHPAD', 3),
+    dynamicSizingEnabled: booleanFromEnv('DYNAMIC_SIZING_ENABLED', false),
   };
 }
 
@@ -539,6 +710,9 @@ export function validateStartupConfig(config: Config): boolean {
     'rpcIndexingRetryDelayMs',
     'maxRecheckAttempts',
     'borderlineRecheckMaxAttempts',
+    'maxAutoSlippageRetry',
+    'autoSlippageIncrementBps',
+    'stateFlushIntervalMs',
   ];
   for (const field of positiveFields) {
     const value = Number(config[field]);
@@ -615,6 +789,15 @@ export function validateStartupConfig(config: Config): boolean {
     errors.push(
       'LIVE_TRADING_ENABLED=true is required when PAPER_TRADING=false and DRY_RUN=false.'
     );
+  }
+
+  if (config.useJito) {
+    if (!config.jitoBlockEngineUrl) {
+      errors.push('jitoBlockEngineUrl is required when USE_JITO=true.');
+    }
+    if (config.jitoTipLamports <= 0n) {
+      errors.push('jitoTipLamports must be greater than 0 when USE_JITO=true.');
+    }
   }
 
   if (errors.length > 0) {

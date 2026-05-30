@@ -1,20 +1,26 @@
 'use strict';
-const { createTestConfig, createState, withPatchedMembers } = require('./_test_helpers');
-const assert = require('node:assert/strict');
-const test = require('node:test');
-const utils = require('../utils');
-const fs = require('node:fs');
-const fsPromises = require('node:fs/promises');
-const path = require('node:path');
+import { createTestConfig, createState, withPatchedMembers, createCtx } from './_test_helpers.js';
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import * as utils from '../src/core/utils.js';
+import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import path from 'node:path';
+import { Context, ClosedTrade } from '../src/types/index.js';
 
 test('utils journalClosedTrade appends a JSONL line with enriched trade data', async () => {
   const testFile = path.join(process.cwd(), '.test-artifacts', 'test-trade-journal.jsonl');
   if (fs.existsSync(testFile)) fs.unlinkSync(testFile);
-  const ctx = createTestConfig({ tradeJournalFile: testFile });
+  const config = createTestConfig({ tradeJournalFile: testFile });
   const state = createState({ closedTrades: [] });
-  const testCtx = { config: ctx, state, logger: () => {}, persistState: () => {} };
+  const testCtx = {
+    config,
+    state,
+    logger: () => {},
+    persistState: async () => {},
+  } as unknown as Context;
 
-  const trade = {
+  const trade: ClosedTrade = {
     mint: 'TestMint',
     symbol: 'TST',
     exitReason: 'take-profit-1.5x',
@@ -38,7 +44,7 @@ test('utils journalClosedTrade appends a JSONL line with enriched trade data', a
     initialBuyAmountSol: '0.05',
   };
 
-  utils.journalClosedTrade(testCtx, trade);
+  utils.journalClosedTrade(testCtx, trade as any);
 
   let content = '';
   for (let i = 0; i < 40; i++) {
@@ -51,7 +57,7 @@ test('utils journalClosedTrade appends a JSONL line with enriched trade data', a
 
   assert.ok(content.length > 0);
   const lines = content.split('\n');
-  const parsed = JSON.parse(lines[lines.length - 1]);
+  const parsed = JSON.parse(lines[lines.length - 1]!);
   assert.equal(parsed.mint, 'TestMint');
   assert.equal(parsed.entryScore, 80);
   assert.equal(parsed.exitReason, 'take-profit-1.5x');
@@ -110,8 +116,6 @@ test('utility decodePumpCurve decodes valid pump.fun curve buffers', () => {
   assert.equal(decoded.isCompleted, false);
 });
 
-// --- NEW TEST CASES ---
-
 test('safeJsonStringify serializes BigInt and other standard types correctly', () => {
   const payload = {
     bigValue: 1234567890123456789n,
@@ -138,14 +142,14 @@ test('atomicWriteFile retries on Windows EPERM / EBUSY errors', async () => {
   await withPatchedMembers(
     fsPromises,
     {
-      writeFile: async (filePath, content, encoding) => {
+      writeFile: async (filePath: string, content: string, encoding: string) => {
         writeFileCalls++;
         if (writeFileCalls === 1) {
-          const err = new Error('EPERM: operation not permitted');
+          const err = new Error('EPERM: operation not permitted') as any;
           err.code = 'EPERM';
           throw err;
         }
-        return originalWriteFile(filePath, content, encoding);
+        return originalWriteFile(filePath, content, encoding as any);
       },
     },
     async () => {
@@ -155,4 +159,99 @@ test('atomicWriteFile retries on Windows EPERM / EBUSY errors', async () => {
       assert.equal(written, 'retry success');
     }
   );
+});
+
+test('utils additional coverage tests', async () => {
+  // 1. atomicWriteFile falsy path & non-retried error
+  await utils.atomicWriteFile('', 'ignored'); // should return immediately
+
+  await assert.rejects(
+    () =>
+      utils.atomicWriteFile(path.join(process.cwd(), '.test-artifacts'), 'data', {
+        logErrors: false,
+      }),
+    (err: any) => err.code === 'EISDIR' || err.code === 'EACCES' || !!err
+  );
+
+  // 2. appendFileLine and appendFileLineSync falsy path
+  utils.appendFileLine('', 'ignored');
+  utils.appendFileLineSync('', 'ignored');
+
+  // 3. safeJsonStringify with space parameter
+  const obj = { a: 1 };
+  const str = utils.safeJsonStringify(obj, 2);
+  assert.ok(str.includes('\n'));
+
+  // 4. log prefix fallback & console suppression
+  const originalConsoleLog = console.log;
+  let loggedConsole: string | null = null;
+  console.log = (msg: string) => {
+    loggedConsole = msg;
+  };
+
+  try {
+    utils.setConsoleSuppressed(false);
+    utils.log(null, 'hello', 'unknown', { console: true });
+    assert.match(loggedConsole!, /\[INFO\] hello/);
+
+    utils.setConsoleSuppressed(true);
+    loggedConsole = null;
+    utils.log(null, 'hello', 'info');
+    assert.equal(loggedConsole, null);
+  } finally {
+    utils.setConsoleSuppressed(false);
+    console.log = originalConsoleLog;
+  }
+
+  // 5. formatUsd non-finite and fractional
+  assert.equal(utils.formatUsd(NaN), '$0.00');
+  assert.equal(utils.formatUsd(0.0001), '$0.000100');
+
+  // 6. atomicToDecimalString negative
+  assert.equal(utils.atomicToDecimalString(-100n, 2), '-1');
+
+  // 7. decimalToAtomic errors
+  assert.throws(() => utils.decimalToAtomic('abc', 9), /Invalid decimal value/);
+
+  // 8. bigintRatioToNumber denominator <= 0n
+  assert.equal(utils.bigintRatioToNumber(10n, 0n), 0);
+
+  // 9. clamp
+  assert.equal(utils.clamp(5, 10, 20), 10);
+  assert.equal(utils.clamp(25, 10, 20), 20);
+  assert.equal(utils.clamp(15, 10, 20), 15);
+
+  // 10. normalizeLaunchpad fallback
+  assert.equal(utils.normalizeLaunchpad(''), 'unknown');
+
+  // 11. deriveWsRpcUrl errors and protocols
+  assert.equal(utils.deriveWsRpcUrl('invalid-url'), 'invalid-url');
+  assert.equal(utils.deriveWsRpcUrl('https://example.com'), 'wss://example.com/');
+  assert.equal(utils.deriveWsRpcUrl('http://example.com'), 'ws://example.com/');
+
+  // 12. ShortTermCache eviction & clear via rpcCall
+  const testCtx = createCtx();
+  let rpcCalls = 0;
+  testCtx.rpc = {
+    getEpochInfo: () => ({
+      send: async () => {
+        rpcCalls++;
+        return { value: rpcCalls };
+      },
+    }),
+  } as any;
+  testCtx.rpcs = [testCtx.rpc];
+
+  const res1 = (await utils.rpcCall(testCtx, 'getEpochInfo', [], { cacheTtlMs: 50 })) as any;
+  const res2 = (await utils.rpcCall(testCtx, 'getEpochInfo', [], { cacheTtlMs: 50 })) as any;
+  assert.equal(res1.value, 1);
+  assert.equal(res2.value, 1); // served from cache
+
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  const res3 = (await utils.rpcCall(testCtx, 'getEpochInfo', [], { cacheTtlMs: 50 })) as any;
+  assert.equal(res3.value, 2); // cache evicted due to TTL
+
+  // 13. isTransientOperationError
+  assert.equal(utils.isTransientOperationError(new Error('rate limit')), true);
+  assert.equal(utils.isTransientOperationError(new Error('fatal error')), false);
 });

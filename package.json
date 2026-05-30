@@ -1,9 +1,10 @@
 {
   "name": "veloci-buy",
-  "version": "2.6.0",
+  "version": "3.0.0",
   "private": true,
+  "type": "module",
   "description": "High-performance Solana discovery and execution engine with Jupiter execution and staged audit filters.",
-  "main": "bot.js",
+  "main": "dist/index.js",
   "engines": {
     "node": ">=20.19.0"
   },
@@ -11,13 +12,15 @@
     "build": "tsc",
     "start": "tsx src/index.ts",
     "start:prod": "node dist/index.js",
-    "test": "node --import tsx --test tests/*.test.js",
-    "check": "node scripts/check-syntax.js",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "check": "tsx scripts/check-syntax.ts",
     "lint": "eslint .",
     "format:check": "prettier --check .",
     "format": "prettier --write .",
     "audit": "npm audit",
     "analyze-pnl": "tsx src/core/pnl-analyzer.ts",
+    "analyze": "tsx src/core/analyze.ts",
+    "manage-keystore": "tsx scripts/manage-keystore.ts",
     "ci": "npm run audit && npm run check && npm run lint && npm run format:check && npm run build && npm test"
   },
   "dependencies": {
@@ -27,10 +30,16 @@
     "@solana/rpc-subscriptions": "^2.0.0",
     "@solana/signers": "^2.0.0",
     "@solana/transactions": "^6.8.0",
-    "bs58": "^6.0.0"
+    "better-sqlite3": "^12.10.0",
+    "blessed": "^0.1.81",
+    "bs58": "^6.0.0",
+    "js-yaml": "^4.1.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/blessed": "^0.1.27",
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^25.9.1",
     "@typescript-eslint/eslint-plugin": "^8.60.0",
     "@typescript-eslint/parser": "^8.60.0",
